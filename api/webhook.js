@@ -8,43 +8,63 @@ const ADMIN_ID = String(process.env.ADMIN_ID || '5411921025').trim();
 const BOT_USERNAME = process.env.BOT_USERNAME || 'LankaFile_bot';
 
 let cachedClient = null;
+let cachedDb = null;
+
 async function getDb() {
+  if (cachedDb) return cachedDb;
   if (!cachedClient) {
-    cachedClient = new MongoClient(MONGODB_URI);
+    cachedClient = new MongoClient(MONGODB_URI, {
+      maxPoolSize: 10,
+      serverSelectionTimeoutMS: 5000
+    });
     await cachedClient.connect();
   }
-  return cachedClient.db('file_store_bot');
+  cachedDb = cachedClient.db('file_store_bot');
+  return cachedDb;
 }
 
 async function getSettings(db) {
-  const col = db.collection('settings');
-  let s = await col.findOne({ _id: 'config' });
-  if (!s) {
-    s = {
-      _id: 'config',
-      fsub_enabled: true,
+  try {
+    const col = db.collection('settings');
+    let s = await col.findOne({ _id: 'config' });
+    if (!s) {
+      s = {
+        _id: 'config',
+        fsub_enabled: true,
+        fsub_channels: [],
+        protect_content: true,
+        auto_delete: true,
+        delete_delay_minutes: 180,
+        welcome_text: "👋 Welcome {mention}! Click a valid link to get your files.",
+        warning_text: "⚠️ Important: All messages will be deleted after {time}\n\n<blockquote>👑 HOT LANKA VIP ACCESS 💰 Fee: Rs. 500/= only 📩 Get VIP: @LankaAdmin_bot</blockquote>"
+      };
+      await col.insertOne(s);
+    }
+    return s;
+  } catch (err) {
+    console.error('getSettings error:', err.message);
+    return {
+      fsub_enabled: false,
       fsub_channels: [],
       protect_content: true,
       auto_delete: true,
       delete_delay_minutes: 180,
-      welcome_text: "👋 Welcome {mention}! Click a valid link to get your files.",
-      warning_text: "⚠️ Important: All messages will be deleted after {time}\n\n<blockquote>👑 HOT LANKA VIP ACCESS 💰 Fee: Rs. 500/= only 📩 Get VIP: @LankaAdmin_bot</blockquote>"
+      welcome_text: "👋 Welcome! Click a valid link to get your files.",
+      warning_text: "⚠️ Important: All messages will be deleted after {time}"
     };
-    await col.insertOne(s);
   }
-  return s;
 }
 
-// User Tracking Helper
-async function saveUser(db, user) {
+// Background User Tracking (කිසිම වෙලාවක bot block වෙන්නේ නැත)
+function trackUserBackground(db, user) {
   if (!user || !user.id) return;
-  await db.collection('bot_users').updateOne(
+  db.collection('bot_users').updateOne(
     { user_id: user.id },
     {
       $set: { first_name: user.first_name \vert{}\vert{} '', username: user.username \vert{}\vert{} '', last_active: new Date() },$setOnInsert: { joined_at: new Date() }
     },
     { upsert: true }
-  );
+  ).catch(err => console.error('trackUser error:', err.message));
 }
 
 const bot = new Telegraf(BOT_TOKEN);
@@ -52,6 +72,7 @@ const adminStates = {};
 
 // Helper: Format Placeholders
 function formatUserText(text, user) {
+  if (!text) return '';
   const firstName = user.first_name || '';
   const lastName = user.last_name || '';
   const fullName = `${firstName} ${lastName}`.trim() || 'User';
@@ -112,172 +133,185 @@ function decodeOldCodeX(buf) {
 
 // /start Handler
 bot.start(async (ctx) => {
-  const db = await getDb();
-  await saveUser(db, ctx.from);
-  const settings = await getSettings(db);
-  const payload = ctx.startPayload;
-  const userId = ctx.from.id;
+  try {
+    const db = await getDb();
+    trackUserBackground(db, ctx.from);
+    const settings = await getSettings(db);
+    const payload = ctx.startPayload;
+    const userId = ctx.from.id;
 
-  if (payload) {
-    // 1. Force Sub Check
-    if (settings.fsub_enabled && settings.fsub_channels && settings.fsub_channels.length > 0) {
-      const pendingChannels = await checkFsub(ctx, userId, settings.fsub_channels);
-      if (pendingChannels.length > 0) {
-        const buttons = pendingChannels.map(ch => [Markup.button.url(`📢 Join ${ch.title || 'Channel'}`, ch.link)]);
-        buttons.push([Markup.button.url('🔄 Try Again', `https://t.me/${BOT_USERNAME}?start=${payload}`)]);
-        return ctx.reply('⚠️ Please join our channel first to get your files:', Markup.inlineKeyboard(buttons));
-      }
-    }
-
-    let msgIdsToSend = [];
-
-    // Old Link Logic
-    if (payload.startsWith('DW5')) {
-      try {
-        const rawBuf = safeBase64Decode(payload);
-        const decodedOldId = decodeOldCodeX(rawBuf);
-        if (decodedOldId && decodedOldId > 0) {
-          msgIdsToSend.push(decodedOldId);
+    if (payload) {
+      // 1. Force Sub Check
+      if (settings.fsub_enabled && settings.fsub_channels && settings.fsub_channels.length > 0) {
+        const pendingChannels = await checkFsub(ctx, userId, settings.fsub_channels);
+        if (pendingChannels.length > 0) {
+          const buttons = pendingChannels.map(ch => [Markup.button.url(`📢 Join ${ch.title || 'Channel'}`, ch.link)]);
+          buttons.push([Markup.button.url('🔄 Try Again', `https://t.me/${BOT_USERNAME}?start=${payload}`)]);
+          return ctx.reply('⚠️ Please join our channel first to get your files:', Markup.inlineKeyboard(buttons));
         }
-      } catch (err) {
-        console.error('Old link decode error:', err);
       }
-    } 
-    // Batch Logic
-    else if (payload.startsWith('BATCH_')) {
-      try {
-        const b64Part = payload.replace('BATCH_', '');
-        const rangeStr = safeBase64Decode(b64Part).toString('utf-8');
-        const [startId, endId] = rangeStr.split('-').map(Number);
-        if (startId && endId && startId <= endId) {
-          for (let i = startId; i <= endId; i++) msgIdsToSend.push(i);
+
+      let msgIdsToSend = [];
+
+      // Old Link Logic
+      if (payload.startsWith('DW5')) {
+        try {
+          const rawBuf = safeBase64Decode(payload);
+          const decodedOldId = decodeOldCodeX(rawBuf);
+          if (decodedOldId && decodedOldId > 0) {
+            msgIdsToSend.push(decodedOldId);
+          }
+        } catch (err) {
+          console.error('Old link decode error:', err);
         }
-      } catch (err) {
-        console.error('Batch decode error:', err);
-      }
-    } 
-    // New Single File Logic
-    else {
-      try {
-        const singleId = Number(safeBase64Decode(payload).toString('utf-8'));
-        if (!isNaN(singleId) && singleId > 0) {
-          msgIdsToSend.push(singleId);
+      } 
+      // Batch Logic
+      else if (payload.startsWith('BATCH_')) {
+        try {
+          const b64Part = payload.replace('BATCH_', '');
+          const rangeStr = safeBase64Decode(b64Part).toString('utf-8');
+          const [startId, endId] = rangeStr.split('-').map(Number);
+          if (startId && endId && startId <= endId) {
+            for (let i = startId; i <= endId; i++) msgIdsToSend.push(i);
+          }
+        } catch (err) {
+          console.error('Batch decode error:', err);
         }
-      } catch (err) {
-        console.error('Single link decode error:', err);
+      } 
+      // New Single File Logic
+      else {
+        try {
+          const singleId = Number(safeBase64Decode(payload).toString('utf-8'));
+          if (!isNaN(singleId) && singleId > 0) {
+            msgIdsToSend.push(singleId);
+          }
+        } catch (err) {
+          console.error('Single link decode error:', err);
+        }
       }
-    }
 
-    if (msgIdsToSend.length === 0) {
-      return ctx.reply('❌ Invalid or expired link.');
-    }
-
-    // Copy messages
-    const sentMsgIds = [];
-
-    for (const msgId of msgIdsToSend) {
-      try {
-        const res = await ctx.telegram.copyMessage(ctx.chat.id, DB_CHANNEL_ID, msgId, {
-          protect_content: settings.protect_content
-        });
-        sentMsgIds.push(res.message_id);
-      } catch (err) {
-        console.warn(`Skipped missing/deleted msg ${msgId}: ${err.message}`);
+      if (msgIdsToSend.length === 0) {
+        return ctx.reply('❌ Invalid or expired link.');
       }
-    }
 
-    if (sentMsgIds.length > 0) {
-      let warnText = settings.warning_text.replace('{time}', formatDuration(settings.delete_delay_minutes));
-      warnText = formatUserText(warnText, ctx.from);
-      const warnMsg = await ctx.reply(warnText, { parse_mode: 'HTML' });
-      sentMsgIds.push(warnMsg.message_id);
-
-      if (settings.auto_delete) {
-        const deleteAt = new Date(Date.now() + settings.delete_delay_minutes * 60 * 1000);
-        await db.collection('deletion_queue').insertOne({
-          chat_id: ctx.chat.id,
-          message_ids: sentMsgIds,
-          delete_at: deleteAt
-        });
+      // Copy messages
+      const sentMsgIds = [];
+      for (const msgId of msgIdsToSend) {
+        try {
+          const res = await ctx.telegram.copyMessage(ctx.chat.id, DB_CHANNEL_ID, msgId, {
+            protect_content: settings.protect_content
+          });
+          sentMsgIds.push(res.message_id);
+        } catch (err) {
+          console.warn(`Skipped missing/deleted msg ${msgId}: ${err.message}`);
+        }
       }
-    } else {
-      return ctx.reply('❌ No available files found for this link.');
+
+      if (sentMsgIds.length > 0) {
+        let warnText = settings.warning_text.replace('{time}', formatDuration(settings.delete_delay_minutes));
+        warnText = formatUserText(warnText, ctx.from);
+        const warnMsg = await ctx.reply(warnText, { parse_mode: 'HTML' });
+        sentMsgIds.push(warnMsg.message_id);
+
+        if (settings.auto_delete) {
+          const deleteAt = new Date(Date.now() + settings.delete_delay_minutes * 60 * 1000);
+          await db.collection('deletion_queue').insertOne({
+            chat_id: ctx.chat.id,
+            message_ids: sentMsgIds,
+            delete_at: deleteAt
+          }).catch(err => console.error('deletion_queue error:', err.message));
+        }
+      } else {
+        return ctx.reply('❌ No available files found for this link.');
+      }
+
+      return;
     }
 
-    return;
+    const formattedWelcome = formatUserText(settings.welcome_text, ctx.from);
+    return ctx.reply(formattedWelcome, { parse_mode: 'HTML' });
+  } catch (e) {
+    console.error('Error in bot.start:', e);
+    return ctx.reply('👋 Welcome to the Bot!');
   }
-
-  const formattedWelcome = formatUserText(settings.welcome_text, ctx.from);
-  return ctx.reply(formattedWelcome, { parse_mode: 'HTML' });
 });
 
 // Bot Analytics / Stats Command
 bot.command('stats', async (ctx) => {
   if (String(ctx.from.id) !== ADMIN_ID) return;
-  const db = await getDb();
-  const settings = await getSettings(db);
+  try {
+    const db = await getDb();
+    const settings = await getSettings(db);
 
-  const totalUsers = await db.collection('bot_users').countDocuments();
-  const pendingDeletes = await db.collection('deletion_queue').countDocuments();
+    const totalUsers = await db.collection('bot_users').countDocuments();
+    const pendingDeletes = await db.collection('deletion_queue').countDocuments();
 
-  const statsText = `📊 <b>Bot Analytics & Stats</b>\n\n` +
-    `👥 <b>Total Active Users:</b> <code>${totalUsers}</code>\n` +
-    `🗑 <b>Pending Auto-Deletes:</b> <code>${pendingDeletes}</code>\n` +
-    `📢 <b>FSUB Channels Active:</b> <code>${settings.fsub_channels.length}</code>\n` +
-    `⏱ <b>Auto-Delete Delay:</b> <code>${formatDuration(settings.delete_delay_minutes)}</code>\n` +
-    `🛡 <b>Content Protection:</b> <code>${settings.protect_content ? 'Enabled' : 'Disabled'}</code>`;
+    const statsText = `📊 <b>Bot Analytics & Stats</b>\n\n` +
+      `👥 <b>Total Active Users:</b> <code>${totalUsers}</code>\n` +
+      `🗑 <b>Pending Auto-Deletes:</b> <code>${pendingDeletes}</code>\n` +
+      `📢 <b>FSUB Channels Active:</b> <code>${settings.fsub_channels.length}</code>\n` +
+      `⏱ <b>Auto-Delete Delay:</b> <code>${formatDuration(settings.delete_delay_minutes)}</code>\n` +
+      `🛡 <b>Content Protection:</b> <code>${settings.protect_content ? 'Enabled' : 'Disabled'}</code>`;
 
-  return ctx.reply(statsText, { parse_mode: 'HTML' });
+    return ctx.reply(statsText, { parse_mode: 'HTML' });
+  } catch (err) {
+    console.error('Stats error:', err);
+    return ctx.reply(`❌ Stats Error: ${err.message}`);
+  }
 });
 
 // Broadcast Command Setup
 bot.command('broadcast', async (ctx) => {
   if (String(ctx.from.id) !== ADMIN_ID) return;
   adminStates[ctx.from.id] = 'awaiting_broadcast_message';
-  return ctx.reply('📢 <b>Broadcast Setup:</b>\n\nPlease send or forward the message you want to broadcast to all users.', { parse_mode: 'HTML' });
+  return ctx.reply('📢 <b>Broadcast Setup:</b>\n\nPlease send the message (Text, Photo, Video) you want to broadcast to all users.', { parse_mode: 'HTML' });
 });
 
 // Admin Panel Command
 bot.command('settings', async (ctx) => {
   if (String(ctx.from.id) !== ADMIN_ID) return;
-  const db = await getDb();
-  const settings = await getSettings(db);
+  try {
+    const db = await getDb();
+    const settings = await getSettings(db);
 
-  const panelText = `⚙️ **Bot Control Panel**\n\n` +
-    `• Force Sub: ${settings.fsub_enabled ? '🟢 ON' : '🔴 OFF'}\n` +
-    `• Content Protect: ${settings.protect_content ? '🟢 ON' : '🔴 OFF'}\n` +
-    `• Auto-Delete: ${settings.auto_delete ? '🟢 ON' : '🔴 OFF'}\n` +
-    `• Delete Delay: ⏱️ ${formatDuration(settings.delete_delay_minutes)}\n` +
-    `• FSUB Channels: ${settings.fsub_channels.length}`;
+    const panelText = `⚙️ **Bot Control Panel**\n\n` +
+      `• Force Sub: ${settings.fsub_enabled ? '🟢 ON' : '🔴 OFF'}\n` +
+      `• Content Protect: ${settings.protect_content ? '🟢 ON' : '🔴 OFF'}\n` +
+      `• Auto-Delete: ${settings.auto_delete ? '🟢 ON' : '🔴 OFF'}\n` +
+      `• Delete Delay: ⏱️ ${formatDuration(settings.delete_delay_minutes)}\n` +
+      `• FSUB Channels: ${settings.fsub_channels.length}`;
 
-  const keyboard = Markup.inlineKeyboard([
-    [
-      Markup.button.callback(`FSUB: ${settings.fsub_enabled ? '🟢 ON' : '🔴 OFF'}`, 'toggle_fsub'),
-      Markup.button.callback(`Protect: ${settings.protect_content ? '🟢 ON' : '🔴 OFF'}`, 'toggle_protect')
-    ],
-    [
-      Markup.button.callback(`Auto-Delete: ${settings.auto_delete ? '🟢 ON' : '🔴 OFF'}`, 'toggle_autodel')
-    ],
-    [
-      Markup.button.callback('⏱️ 5 Mins', 'set_time_5'),
-      Markup.button.callback('⏱️ 15 Mins', 'set_time_15'),
-      Markup.button.callback('⏱️ 1 Hour', 'set_time_60')
-    ],
-    [
-      Markup.button.callback('⏱️ 3 Hours', 'set_time_180'),
-      Markup.button.callback('⏱️ 6 Hours', 'set_time_360'),
-      Markup.button.callback('⏱️ 24 Hours', 'set_time_1440')
-    ],
-    [
-      Markup.button.callback('📢 Manage FSUB Channels', 'manage_fsub')
-    ],
-    [
-      Markup.button.callback('✏️ Edit /start Text', 'edit_welcome'),
-      Markup.button.callback('✏️ Edit Warning Text', 'edit_warning')
-    ]
-  ]);
+    const keyboard = Markup.inlineKeyboard([
+      [
+        Markup.button.callback(`FSUB: ${settings.fsub_enabled ? '🟢 ON' : '🔴 OFF'}`, 'toggle_fsub'),
+        Markup.button.callback(`Protect: ${settings.protect_content ? '🟢 ON' : '🔴 OFF'}`, 'toggle_protect')
+      ],
+      [
+        Markup.button.callback(`Auto-Delete: ${settings.auto_delete ? '🟢 ON' : '🔴 OFF'}`, 'toggle_autodel')
+      ],
+      [
+        Markup.button.callback('⏱️ 5 Mins', 'set_time_5'),
+        Markup.button.callback('⏱️ 15 Mins', 'set_time_15'),
+        Markup.button.callback('⏱️ 1 Hour', 'set_time_60')
+      ],
+      [
+        Markup.button.callback('⏱️ 3 Hours', 'set_time_180'),
+        Markup.button.callback('⏱️ 6 Hours', 'set_time_360'),
+        Markup.button.callback('⏱️ 24 Hours', 'set_time_1440')
+      ],
+      [
+        Markup.button.callback('📢 Manage FSUB Channels', 'manage_fsub')
+      ],
+      [
+        Markup.button.callback('✏️ Edit /start Text', 'edit_welcome'),
+        Markup.button.callback('✏️ Edit Warning Text', 'edit_warning')
+      ]
+    ]);
 
-  return ctx.reply(panelText, { parse_mode: 'Markdown', ...keyboard });
+    return ctx.reply(panelText, { parse_mode: 'Markdown', ...keyboard });
+  } catch (e) {
+    console.error('Settings command error:', e);
+  }
 });
 
 bot.action(/^(toggle_fsub|toggle_protect|toggle_autodel|set_time_\d+)$/, async (ctx) => {
@@ -498,7 +532,7 @@ module.exports = async (req, res) => {
     try {
       await bot.handleUpdate(req.body);
     } catch (err) {
-      console.error('Webhook error:', err);
+      console.error('Webhook handleUpdate error:', err);
     }
     return res.status(200).send('OK');
   }
