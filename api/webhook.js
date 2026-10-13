@@ -3,8 +3,9 @@ const { MongoClient } = require('mongodb');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MONGODB_URI = process.env.MONGODB_URI;
-const DB_CHANNEL_ID = process.env.DB_CHANNEL_ID;
-const ADMIN_ID = String(process.env.ADMIN_ID);
+// Channel ID එක string එකක් ලෙස නිවැරදිව තබා ගැනීම
+const DB_CHANNEL_ID = String(process.env.DB_CHANNEL_ID || '-1004365559436').trim();
+const ADMIN_ID = String(process.env.ADMIN_ID || '5411921025').trim();
 const BOT_USERNAME = process.env.BOT_USERNAME || 'LankaFile_bot';
 
 let cachedClient = null;
@@ -63,6 +64,15 @@ function formatDuration(mins) {
   return `${hrs} hour${hrs > 1 ? 's' : ''}`;
 }
 
+// Safe Base64 decode with proper padding
+function safeBase64Decode(str) {
+  let cleaned = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (cleaned.length % 4 !== 0) {
+    cleaned += '=';
+  }
+  return Buffer.from(cleaned, 'base64');
+}
+
 // /start Handler
 bot.start(async (ctx) => {
   const db = await getDb();
@@ -86,7 +96,7 @@ bot.start(async (ctx) => {
     // 1. පරණ File Store Bot (DW5PDMV...) Decoder Logic
     if (payload.startsWith('DW5')) {
       try {
-        const rawBuf = Buffer.from(payload, 'base64');
+        const rawBuf = safeBase64Decode(payload);
         if (rawBuf.length >= 14) {
           const decodedOldId = rawBuf.readUInt32BE(10);
           if (decodedOldId && decodedOldId > 0) {
@@ -100,7 +110,8 @@ bot.start(async (ctx) => {
     // 2. Batch Link Format (BATCH_...)
     else if (payload.startsWith('BATCH_')) {
       try {
-        const rangeStr = Buffer.from(payload.replace('BATCH_', ''), 'base64').toString('ascii');
+        const b64Part = payload.replace('BATCH_', '');
+        const rangeStr = safeBase64Decode(b64Part).toString('utf-8');
         const [startId, endId] = rangeStr.split('-').map(Number);
         if (startId && endId && startId <= endId) {
           for (let i = startId; i <= endId; i++) msgIdsToSend.push(i);
@@ -112,7 +123,7 @@ bot.start(async (ctx) => {
     // 3. අලුත් Single File Format (Base64)
     else {
       try {
-        const singleId = Number(Buffer.from(payload, 'base64').toString('ascii'));
+        const singleId = Number(safeBase64Decode(payload).toString('utf-8'));
         if (!isNaN(singleId) && singleId > 0) {
           msgIdsToSend.push(singleId);
         }
@@ -127,6 +138,8 @@ bot.start(async (ctx) => {
 
     // Copy messages
     const sentMsgIds = [];
+    let copyFailedCount = 0;
+
     for (const msgId of msgIdsToSend) {
       try {
         const res = await ctx.telegram.copyMessage(ctx.chat.id, DB_CHANNEL_ID, msgId, {
@@ -134,28 +147,35 @@ bot.start(async (ctx) => {
         });
         sentMsgIds.push(res.message_id);
       } catch (err) {
-        console.error('Error copying msg:', err.message);
+        copyFailedCount++;
+        console.error(`Error copying msg ${msgId}:`, err.message);
+        // Copy අසාර්ථක වුවහොත් සැබෑ දෝෂය චැට් එකට පෙන්වීම
+        await ctx.reply(`⚠️ දෝෂයකි: Channel Message ID [${msgId}] ලබාගත නොහැකි විය.\nහේතුව: ${err.message}`);
       }
     }
 
-    // Send Warning Message with HTML parse mode
-    const warnText = settings.warning_text.replace('{time}', formatDuration(settings.delete_delay_minutes));
-    const warnMsg = await ctx.reply(warnText, { parse_mode: 'HTML' });
-    sentMsgIds.push(warnMsg.message_id);
+    // Messages සාර්ථකව copy වුණා නම් පමණක් Warning message එක සහ Auto-deletion එක ක්‍රියාත්මක කිරීම
+    if (sentMsgIds.length > 0) {
+      const warnText = settings.warning_text.replace('{time}', formatDuration(settings.delete_delay_minutes));
+      const warnMsg = await ctx.reply(warnText, { parse_mode: 'HTML' });
+      sentMsgIds.push(warnMsg.message_id);
 
-    // Schedule deletion if enabled
-    if (settings.auto_delete) {
-      const deleteAt = new Date(Date.now() + settings.delete_delay_minutes * 60 * 1000);
-      await db.collection('deletion_queue').insertOne({
-        chat_id: ctx.chat.id,
-        message_ids: sentMsgIds,
-        delete_at: deleteAt
-      });
+      if (settings.auto_delete) {
+        const deleteAt = new Date(Date.now() + settings.delete_delay_minutes * 60 * 1000);
+        await db.collection('deletion_queue').insertOne({
+          chat_id: ctx.chat.id,
+          message_ids: sentMsgIds,
+          delete_at: deleteAt
+        });
+      }
+    } else if (copyFailedCount === msgIdsToSend.length) {
+      return ctx.reply('❌ මෙම file එක Database Channel එකේ සොයා ගැනීමට නොහැකි විය. Bot චැනලයේ Admin ද සහ Message ID එක නිවැරදිදැයි පරීක්ෂා කරන්න.');
     }
+
     return;
   }
 
-  // Normal /start welcome message with HTML parse mode
+  // Normal /start welcome message
   return ctx.reply(settings.welcome_text, { parse_mode: 'HTML' });
 });
 
