@@ -3,7 +3,6 @@ const { MongoClient } = require('mongodb');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MONGODB_URI = process.env.MONGODB_URI;
-// Channel ID එක string එකක් ලෙස නිවැරදිව තබා ගැනීම
 const DB_CHANNEL_ID = String(process.env.DB_CHANNEL_ID || '-1004365559436').trim();
 const ADMIN_ID = String(process.env.ADMIN_ID || '5411921025').trim();
 const BOT_USERNAME = process.env.BOT_USERNAME || 'LankaFile_bot';
@@ -24,10 +23,10 @@ async function getSettings(db) {
     s = {
       _id: 'config',
       fsub_enabled: true,
-      fsub_channels: [], // array of { id, title, link }
+      fsub_channels: [],
       protect_content: true,
       auto_delete: true,
-      delete_delay_minutes: 180, // Default 3 hours
+      delete_delay_minutes: 180,
       welcome_text: "👋 සාදරයෙන් පිළිගන්නවා! Files ලබා ගැනීමට අදාළ ලින්ක් එක click කරන්න.",
       warning_text: "⚠️ Important: All Messages will be deleted after {time}\n\n<blockquote>👑 HOT LANKA VIP ACCESS 💰 ගාස්තුව: Rs. 500/= පමණි 📩 VIP ලබාගැනීමට: @LankaAdmin_bot</blockquote>"
     };
@@ -37,11 +36,8 @@ async function getSettings(db) {
 }
 
 const bot = new Telegraf(BOT_TOKEN);
-
-// User state helper for admin inputs
 const adminStates = {};
 
-// Helper: Check FSUB
 async function checkFsub(ctx, userId, channels) {
   const notJoined = [];
   for (const ch of channels) {
@@ -57,20 +53,39 @@ async function checkFsub(ctx, userId, channels) {
   return notJoined;
 }
 
-// Format time
 function formatDuration(mins) {
   if (mins < 60) return `${mins} minutes`;
   const hrs = Math.floor(mins / 60);
   return `${hrs} hour${hrs > 1 ? 's' : ''}`;
 }
 
-// Safe Base64 decode with proper URL-Safe character and padding replacement
 function safeBase64Decode(str) {
   let cleaned = str.replace(/-/g, '+').replace(/_/g, '/');
   while (cleaned.length % 4 !== 0) {
     cleaned += '=';
   }
   return Buffer.from(cleaned, 'base64');
+}
+
+// CodeX / Telethon Old Link Decoder
+function decodeOldCodeX(buf) {
+  // Bytes scan කර 0x00 0x00 sequence එකට පසුව එන 16-bit integer එක සොයා ගැනීම
+  for (let i = 8; i <= buf.length - 4; i++) {
+    if (buf[i] === 0x00 && buf[i + 1] === 0x00) {
+      const candidateId = buf.readUInt16BE(i + 2);
+      if (candidateId > 0 && candidateId < 1000000) {
+        return candidateId;
+      }
+    }
+  }
+  // Fallback direct offsets
+  if (buf.length >= 14) {
+    const val1 = buf.readUInt16BE(12);
+    if (val1 > 0) return val1;
+    const val2 = buf.readUInt16BE(11);
+    if (val2 > 0) return val2;
+  }
+  return null;
 }
 
 // /start Handler
@@ -81,7 +96,6 @@ bot.start(async (ctx) => {
   const userId = ctx.from.id;
 
   if (payload) {
-    // Check Force Sub if enabled
     if (settings.fsub_enabled && settings.fsub_channels.length > 0) {
       const pendingChannels = await checkFsub(ctx, userId, settings.fsub_channels);
       if (pendingChannels.length > 0) {
@@ -97,18 +111,9 @@ bot.start(async (ctx) => {
     if (payload.startsWith('DW5')) {
       try {
         const rawBuf = safeBase64Decode(payload);
-        if (rawBuf.length >= 14) {
-          // Bytes 12 සහ 13 මඟින් Message ID එක නිවැරදිව කියවීම
-          let decodedOldId = rawBuf.readUInt16BE(12);
-
-          // විශාල Message ID එකක් සඳහා Fallback (අවශ්‍ය නම් පමණක්)
-          if (!decodedOldId || decodedOldId === 0) {
-            decodedOldId = rawBuf.readUInt32BE(10) & 0xFFFF;
-          }
-
-          if (decodedOldId && decodedOldId > 0) {
-            msgIdsToSend.push(decodedOldId);
-          }
+        const decodedOldId = decodeOldCodeX(rawBuf);
+        if (decodedOldId && decodedOldId > 0) {
+          msgIdsToSend.push(decodedOldId);
         }
       } catch (err) {
         console.error('Old link decode error:', err);
@@ -160,7 +165,6 @@ bot.start(async (ctx) => {
       }
     }
 
-    // Files සාර්ථකව copy වුණා නම් පමණක් Warning Message එක යැවීම සහ Deletion queue එකට දැමීම
     if (sentMsgIds.length > 0) {
       const warnText = settings.warning_text.replace('{time}', formatDuration(settings.delete_delay_minutes));
       const warnMsg = await ctx.reply(warnText, { parse_mode: 'HTML' });
@@ -175,13 +179,12 @@ bot.start(async (ctx) => {
         });
       }
     } else if (copyFailedCount === msgIdsToSend.length) {
-      return ctx.reply('❌ මෙම file එක Database Channel එකේ සොයා ගැනීමට නොහැකි විය. Bot චැනලයේ Admin ද සහ Message ID එක නිවැරදිදැයි පරීක්ෂා කරන්න.');
+      return ctx.reply('❌ මෙම file එක Database Channel එකේ සොයා ගැනීමට නොහැකි විය.');
     }
 
     return;
   }
 
-  // Normal /start welcome message
   return ctx.reply(settings.welcome_text, { parse_mode: 'HTML' });
 });
 
