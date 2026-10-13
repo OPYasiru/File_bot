@@ -159,7 +159,7 @@ bot.start(async (ctx) => {
       return ctx.reply('❌ Invalid or expired link.');
     }
 
-    // Copy messages (Deleted messages නිහඬව skip කිරීම)
+    // Copy messages
     const sentMsgIds = [];
 
     for (const msgId of msgIdsToSend) {
@@ -169,7 +169,6 @@ bot.start(async (ctx) => {
         });
         sentMsgIds.push(res.message_id);
       } catch (err) {
-        // Message එක delete කර ඇත්නම් හෝ නැතිනම් console එකට පමණක් ලියවා skip කරයි
         console.warn(`Skipped missing/deleted msg ${msgId}: ${err.message}`);
       }
     }
@@ -195,7 +194,6 @@ bot.start(async (ctx) => {
     return;
   }
 
-  // Normal /start welcome message
   const formattedWelcome = formatUserText(settings.welcome_text, ctx.from);
   return ctx.reply(formattedWelcome, { parse_mode: 'HTML' });
 });
@@ -401,7 +399,8 @@ bot.on(['message'], async (ctx) => {
       if (startId && endId && startId <= endId) {
         const payload = Buffer.from(`${startId}-${endId}`).toString('base64');
         const link = `https://t.me/${BOT_USERNAME}?start=BATCH_${payload}`;
-        return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n\n${link}\n\n✅ Batch created for messages ${startId} to ${endId}!`);
+        // ඔයා ඉල්ලූ ආකෘතියට පමණක් link එක යැවීම
+        return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${link}`);
       } else {
         return ctx.reply('❌ Invalid Message IDs. Please run /batch to start again.');
       }
@@ -416,10 +415,8 @@ bot.on(['message'], async (ctx) => {
         const encoded = Buffer.from(String(copied.message_id)).toString('base64');
         const fileLink = `https://t.me/${BOT_USERNAME}?start=${encoded}`;
 
-        return ctx.reply(
-          `🔥 Hot Lanka Exclusive 🔥\n\n${fileLink}\n\n✅ Post published successfully!`,
-          Markup.inlineKeyboard([[Markup.button.url('🔗 Share URL', `https://t.me/share/url?url=${encodeURIComponent(fileLink)}`)]])
-        );
+        // තනි file එකක් forward කළ විටද screenshot එකේ ආකෘතියට පමණක් link එක යැවීම
+        return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${fileLink}`);
       } catch (e) {
         console.error('Error storing single file:', e);
         return ctx.reply(`❌ Could not save file to Database Channel: ${e.message}`);
