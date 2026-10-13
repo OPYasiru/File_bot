@@ -38,7 +38,7 @@ async function getSettings(db) {
 const bot = new Telegraf(BOT_TOKEN);
 const adminStates = {};
 
-// Helper: Format Placeholders ({mention}, {first_name}, {last_name})
+// Helper: Format Placeholders
 function formatUserText(text, user) {
   const firstName = user.first_name || '';
   const lastName = user.last_name || '';
@@ -159,9 +159,8 @@ bot.start(async (ctx) => {
       return ctx.reply('❌ Invalid or expired link.');
     }
 
-    // Copy messages
+    // Copy messages (Deleted messages නිහඬව skip කිරීම)
     const sentMsgIds = [];
-    let copyFailedCount = 0;
 
     for (const msgId of msgIdsToSend) {
       try {
@@ -170,9 +169,8 @@ bot.start(async (ctx) => {
         });
         sentMsgIds.push(res.message_id);
       } catch (err) {
-        copyFailedCount++;
-        console.error(`Error copying msg ${msgId}:`, err.message);
-        await ctx.reply(`⚠️ Error: Could not copy Message ID [${msgId}].\nReason: ${err.message}`);
+        // Message එක delete කර ඇත්නම් හෝ නැතිනම් console එකට පමණක් ලියවා skip කරයි
+        console.warn(`Skipped missing/deleted msg ${msgId}: ${err.message}`);
       }
     }
 
@@ -190,8 +188,8 @@ bot.start(async (ctx) => {
           delete_at: deleteAt
         });
       }
-    } else if (copyFailedCount === msgIdsToSend.length) {
-      return ctx.reply('❌ This file was not found in the Database Channel.');
+    } else {
+      return ctx.reply('❌ No available files found for this link.');
     }
 
     return;
