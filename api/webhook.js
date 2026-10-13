@@ -64,7 +64,7 @@ function formatDuration(mins) {
   return `${hrs} hour${hrs > 1 ? 's' : ''}`;
 }
 
-// Safe Base64 decode with proper padding
+// Safe Base64 decode with proper URL-Safe character and padding replacement
 function safeBase64Decode(str) {
   let cleaned = str.replace(/-/g, '+').replace(/_/g, '/');
   while (cleaned.length % 4 !== 0) {
@@ -98,7 +98,14 @@ bot.start(async (ctx) => {
       try {
         const rawBuf = safeBase64Decode(payload);
         if (rawBuf.length >= 14) {
-          const decodedOldId = rawBuf.readUInt32BE(10);
+          // Bytes 12 සහ 13 මඟින් Message ID එක නිවැරදිව කියවීම
+          let decodedOldId = rawBuf.readUInt16BE(12);
+
+          // විශාල Message ID එකක් සඳහා Fallback (අවශ්‍ය නම් පමණක්)
+          if (!decodedOldId || decodedOldId === 0) {
+            decodedOldId = rawBuf.readUInt32BE(10) & 0xFFFF;
+          }
+
           if (decodedOldId && decodedOldId > 0) {
             msgIdsToSend.push(decodedOldId);
           }
@@ -149,12 +156,11 @@ bot.start(async (ctx) => {
       } catch (err) {
         copyFailedCount++;
         console.error(`Error copying msg ${msgId}:`, err.message);
-        // Copy අසාර්ථක වුවහොත් සැබෑ දෝෂය චැට් එකට පෙන්වීම
         await ctx.reply(`⚠️ දෝෂයකි: Channel Message ID [${msgId}] ලබාගත නොහැකි විය.\nහේතුව: ${err.message}`);
       }
     }
 
-    // Messages සාර්ථකව copy වුණා නම් පමණක් Warning message එක සහ Auto-deletion එක ක්‍රියාත්මක කිරීම
+    // Files සාර්ථකව copy වුණා නම් පමණක් Warning Message එක යැවීම සහ Deletion queue එකට දැමීම
     if (sentMsgIds.length > 0) {
       const warnText = settings.warning_text.replace('{time}', formatDuration(settings.delete_delay_minutes));
       const warnMsg = await ctx.reply(warnText, { parse_mode: 'HTML' });
