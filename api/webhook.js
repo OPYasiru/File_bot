@@ -28,7 +28,7 @@ async function getSettings(db) {
       auto_delete: true,
       delete_delay_minutes: 180, // Default 3 hours
       welcome_text: "👋 සාදරයෙන් පිළිගන්නවා! Files ලබා ගැනීමට අදාළ ලින්ක් එක click කරන්න.",
-      warning_text: "⚠️ Important:\n\nAll Messages deleted after {time}\n\n👑 HOT LANKA VIP ACCESS\n💰 ගාස්තුව: Rs. 500/= පමණි\n📩 VIP ලබාගැනීමට: @LankaAdmin_bot"
+      warning_text: "⚠️ Important: All Messages will be deleted after {time}\n\n<blockquote>👑 HOT LANKA VIP ACCESS 💰 ගාස්තුව: Rs. 500/= පමණි 📩 VIP ලබාගැනීමට: @LankaAdmin_bot</blockquote>"
     };
     await col.insertOne(s);
   }
@@ -70,7 +70,6 @@ bot.start(async (ctx) => {
   const payload = ctx.startPayload;
   const userId = ctx.from.id;
 
-  // Single file or Batch
   if (payload) {
     // Check Force Sub if enabled
     if (settings.fsub_enabled && settings.fsub_channels.length > 0) {
@@ -83,15 +82,43 @@ bot.start(async (ctx) => {
     }
 
     let msgIdsToSend = [];
-    if (payload.startsWith('BATCH_')) {
-      const rangeStr = Buffer.from(payload.replace('BATCH_', ''), 'base64').toString('ascii');
-      const [startId, endId] = rangeStr.split('-').map(Number);
-      if (startId && endId && startId <= endId) {
-        for (let i = startId; i <= endId; i++) msgIdsToSend.push(i);
+
+    // 1. පරණ File Store Bot (DW5PDMV...) Decoder Logic
+    if (payload.startsWith('DW5')) {
+      try {
+        const rawBuf = Buffer.from(payload, 'base64');
+        if (rawBuf.length >= 14) {
+          const decodedOldId = rawBuf.readUInt32BE(10);
+          if (decodedOldId && decodedOldId > 0) {
+            msgIdsToSend.push(decodedOldId);
+          }
+        }
+      } catch (err) {
+        console.error('Old link decode error:', err);
       }
-    } else {
-      const singleId = Number(Buffer.from(payload, 'base64').toString('ascii'));
-      if (singleId) msgIdsToSend.push(singleId);
+    } 
+    // 2. Batch Link Format (BATCH_...)
+    else if (payload.startsWith('BATCH_')) {
+      try {
+        const rangeStr = Buffer.from(payload.replace('BATCH_', ''), 'base64').toString('ascii');
+        const [startId, endId] = rangeStr.split('-').map(Number);
+        if (startId && endId && startId <= endId) {
+          for (let i = startId; i <= endId; i++) msgIdsToSend.push(i);
+        }
+      } catch (err) {
+        console.error('Batch decode error:', err);
+      }
+    } 
+    // 3. අලුත් Single File Format (Base64)
+    else {
+      try {
+        const singleId = Number(Buffer.from(payload, 'base64').toString('ascii'));
+        if (!isNaN(singleId) && singleId > 0) {
+          msgIdsToSend.push(singleId);
+        }
+      } catch (err) {
+        console.error('Single link decode error:', err);
+      }
     }
 
     if (msgIdsToSend.length === 0) {
@@ -111,9 +138,9 @@ bot.start(async (ctx) => {
       }
     }
 
-    // Send Warning Message
+    // Send Warning Message with HTML parse mode
     const warnText = settings.warning_text.replace('{time}', formatDuration(settings.delete_delay_minutes));
-    const warnMsg = await ctx.reply(warnText);
+    const warnMsg = await ctx.reply(warnText, { parse_mode: 'HTML' });
     sentMsgIds.push(warnMsg.message_id);
 
     // Schedule deletion if enabled
@@ -128,8 +155,8 @@ bot.start(async (ctx) => {
     return;
   }
 
-  // Normal /start welcome message
-  return ctx.reply(settings.welcome_text);
+  // Normal /start welcome message with HTML parse mode
+  return ctx.reply(settings.welcome_text, { parse_mode: 'HTML' });
 });
 
 // Admin Panel Command
@@ -195,7 +222,6 @@ bot.action(/^(toggle_fsub|toggle_protect|toggle_autodel|set_time_\d+)$/, async (
   }
 
   await ctx.answerCbQuery('Settings Updated!');
-  // Refresh panel
   const updated = await getSettings(db);
   const panelText = `⚙️ **Bot Control Panel**\n\n` +
     `• Force Sub: ${updated.fsub_enabled ? '🟢 ON' : '🔴 OFF'}\n` +
