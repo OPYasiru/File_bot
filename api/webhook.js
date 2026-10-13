@@ -27,8 +27,8 @@ async function getSettings(db) {
       protect_content: true,
       auto_delete: true,
       delete_delay_minutes: 180,
-      welcome_text: "👋 සාදරයෙන් පිළිගන්නවා! Files ලබා ගැනීමට අදාළ ලින්ක් එක click කරන්න.",
-      warning_text: "⚠️ Important: All Messages will be deleted after {time}\n\n<blockquote>👑 HOT LANKA VIP ACCESS 💰 ගාස්තුව: Rs. 500/= පමණි 📩 VIP ලබාගැනීමට: @LankaAdmin_bot</blockquote>"
+      welcome_text: "👋 Welcome {mention}! Click a valid link to get your files.",
+      warning_text: "⚠️ Important: All messages will be deleted after {time}\n\n<blockquote>👑 HOT LANKA VIP ACCESS 💰 Fee: Rs. 500/= only 📩 Get VIP: @LankaAdmin_bot</blockquote>"
     };
     await col.insertOne(s);
   }
@@ -38,16 +38,31 @@ async function getSettings(db) {
 const bot = new Telegraf(BOT_TOKEN);
 const adminStates = {};
 
+// Helper: Format Placeholders ({mention}, {first_name}, {last_name})
+function formatUserText(text, user) {
+  const firstName = user.first_name || '';
+  const lastName = user.last_name || '';
+  const fullName = `${firstName} ${lastName}`.trim() || 'User';
+  const mention = `<a href="tg://user?id=${user.id}">${fullName}</a>`;
+
+  return text
+    .replace(/{mention}/g, mention)
+    .replace(/{first_name}/g, firstName)
+    .replace(/{last_name}/g, lastName);
+}
+
+// Helper: Check FSUB
 async function checkFsub(ctx, userId, channels) {
   const notJoined = [];
   for (const ch of channels) {
     try {
-      const member = await ctx.telegram.getChatMember(ch.id, userId);
+      const channelId = String(ch.id).trim();
+      const member = await ctx.telegram.getChatMember(channelId, userId);
       if (['left', 'kicked'].includes(member.status)) {
         notJoined.push(ch);
       }
     } catch (e) {
-      console.error(`FSUB Error for ${ch.id}:`, e.message);
+      notJoined.push(ch);
     }
   }
   return notJoined;
@@ -67,9 +82,7 @@ function safeBase64Decode(str) {
   return Buffer.from(cleaned, 'base64');
 }
 
-// CodeX / Telethon Old Link Decoder
 function decodeOldCodeX(buf) {
-  // Bytes scan කර 0x00 0x00 sequence එකට පසුව එන 16-bit integer එක සොයා ගැනීම
   for (let i = 8; i <= buf.length - 4; i++) {
     if (buf[i] === 0x00 && buf[i + 1] === 0x00) {
       const candidateId = buf.readUInt16BE(i + 2);
@@ -78,12 +91,9 @@ function decodeOldCodeX(buf) {
       }
     }
   }
-  // Fallback direct offsets
   if (buf.length >= 14) {
     const val1 = buf.readUInt16BE(12);
     if (val1 > 0) return val1;
-    const val2 = buf.readUInt16BE(11);
-    if (val2 > 0) return val2;
   }
   return null;
 }
@@ -96,18 +106,19 @@ bot.start(async (ctx) => {
   const userId = ctx.from.id;
 
   if (payload) {
-    if (settings.fsub_enabled && settings.fsub_channels.length > 0) {
+    // 1. Force Sub Check
+    if (settings.fsub_enabled && settings.fsub_channels && settings.fsub_channels.length > 0) {
       const pendingChannels = await checkFsub(ctx, userId, settings.fsub_channels);
       if (pendingChannels.length > 0) {
         const buttons = pendingChannels.map(ch => [Markup.button.url(`📢 Join ${ch.title || 'Channel'}`, ch.link)]);
         buttons.push([Markup.button.url('🔄 Try Again', `https://t.me/${BOT_USERNAME}?start=${payload}`)]);
-        return ctx.reply('⚠️ Files ලබා ගැනීමට පහත Channels වලට Join වන්න:', Markup.inlineKeyboard(buttons));
+        return ctx.reply('⚠️ Please join our channel first to get your files:', Markup.inlineKeyboard(buttons));
       }
     }
 
     let msgIdsToSend = [];
 
-    // 1. පරණ File Store Bot (DW5PDMV...) Decoder Logic
+    // Old Link Logic
     if (payload.startsWith('DW5')) {
       try {
         const rawBuf = safeBase64Decode(payload);
@@ -119,7 +130,7 @@ bot.start(async (ctx) => {
         console.error('Old link decode error:', err);
       }
     } 
-    // 2. Batch Link Format (BATCH_...)
+    // Batch Logic
     else if (payload.startsWith('BATCH_')) {
       try {
         const b64Part = payload.replace('BATCH_', '');
@@ -132,7 +143,7 @@ bot.start(async (ctx) => {
         console.error('Batch decode error:', err);
       }
     } 
-    // 3. අලුත් Single File Format (Base64)
+    // New Single File Logic
     else {
       try {
         const singleId = Number(safeBase64Decode(payload).toString('utf-8'));
@@ -145,7 +156,7 @@ bot.start(async (ctx) => {
     }
 
     if (msgIdsToSend.length === 0) {
-      return ctx.reply('❌ Invalid හෝ Expire වූ link එකක්.');
+      return ctx.reply('❌ Invalid or expired link.');
     }
 
     // Copy messages
@@ -161,12 +172,13 @@ bot.start(async (ctx) => {
       } catch (err) {
         copyFailedCount++;
         console.error(`Error copying msg ${msgId}:`, err.message);
-        await ctx.reply(`⚠️ දෝෂයකි: Channel Message ID [${msgId}] ලබාගත නොහැකි විය.\nහේතුව: ${err.message}`);
+        await ctx.reply(`⚠️ Error: Could not copy Message ID [${msgId}].\nReason: ${err.message}`);
       }
     }
 
     if (sentMsgIds.length > 0) {
-      const warnText = settings.warning_text.replace('{time}', formatDuration(settings.delete_delay_minutes));
+      let warnText = settings.warning_text.replace('{time}', formatDuration(settings.delete_delay_minutes));
+      warnText = formatUserText(warnText, ctx.from);
       const warnMsg = await ctx.reply(warnText, { parse_mode: 'HTML' });
       sentMsgIds.push(warnMsg.message_id);
 
@@ -179,13 +191,15 @@ bot.start(async (ctx) => {
         });
       }
     } else if (copyFailedCount === msgIdsToSend.length) {
-      return ctx.reply('❌ මෙම file එක Database Channel එකේ සොයා ගැනීමට නොහැකි විය.');
+      return ctx.reply('❌ This file was not found in the Database Channel.');
     }
 
     return;
   }
 
-  return ctx.reply(settings.welcome_text, { parse_mode: 'HTML' });
+  // Normal /start welcome message
+  const formattedWelcome = formatUserText(settings.welcome_text, ctx.from);
+  return ctx.reply(formattedWelcome, { parse_mode: 'HTML' });
 });
 
 // Admin Panel Command
@@ -231,7 +245,6 @@ bot.command('settings', async (ctx) => {
   return ctx.reply(panelText, { parse_mode: 'Markdown', ...keyboard });
 });
 
-// Settings Callback Actions
 bot.action(/^(toggle_fsub|toggle_protect|toggle_autodel|set_time_\d+)$/, async (ctx) => {
   if (String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const action = ctx.match[1];
@@ -288,7 +301,6 @@ bot.action(/^(toggle_fsub|toggle_protect|toggle_autodel|set_time_\d+)$/, async (
   return ctx.editMessageText(panelText, { parse_mode: 'Markdown', ...keyboard });
 });
 
-// Manage FSUB Channels Menu
 bot.action('manage_fsub', async (ctx) => {
   if (String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const db = await getDb();
@@ -298,7 +310,7 @@ bot.action('manage_fsub', async (ctx) => {
   const buttons = [];
 
   if (settings.fsub_channels.length === 0) {
-    listText += "දැනට channels කිසිවක් නැත.\n";
+    listText += "No channels added yet.\n";
   } else {
     settings.fsub_channels.forEach((ch, idx) => {
       listText += `${idx + 1}. [${ch.title}](${ch.link}) (ID: \`${ch.id}\`)\n`;
@@ -316,7 +328,7 @@ bot.action('manage_fsub', async (ctx) => {
 bot.action('add_fsub', async (ctx) => {
   adminStates[ctx.from.id] = 'awaiting_fsub_input';
   await ctx.answerCbQuery();
-  return ctx.reply("කරුණාකර Channel විස්තර පහත ආකෘතියට එවන්න:\n\n`<Channel_ID>|<Channel_Title>|<Channel_Link>`\n\nඋදාහරණ:\n`-1001234567890|My Channel|https://t.me/mychannel`");
+  return ctx.reply("Please send channel details in this format:\n\n`<Channel_ID>|<Channel_Title>|<Channel_Link>`\n\nExample:\n`-1004306300202|Backup Channel|https://t.me/yourbackup`");
 });
 
 bot.action(/^del_fsub_(.+)$/, async (ctx) => {
@@ -324,19 +336,19 @@ bot.action(/^del_fsub_(.+)$/, async (ctx) => {
   const db = await getDb();
   await db.collection('settings').updateOne({ _id: 'config' }, { $pull: { fsub_channels: { id: chId } } });
   await ctx.answerCbQuery('Channel Removed!');
-  return ctx.reply('Channel එක සාර්ථකව ඉවත් කළා. `/settings` වෙතින් නැවත බලන්න.');
+  return ctx.reply('Channel removed successfully. Send /settings to refresh.');
 });
 
 bot.action('edit_welcome', async (ctx) => {
   adminStates[ctx.from.id] = 'awaiting_welcome_text';
   await ctx.answerCbQuery();
-  return ctx.reply("කරුණාකර අලුත් /start Welcome Message එක එවන්න:");
+  return ctx.reply("Please send your new /start Welcome Message.\n\nYou can use placeholders:\n• {mention}\n• {first_name}\n• {last_name}");
 });
 
 bot.action('edit_warning', async (ctx) => {
   adminStates[ctx.from.id] = 'awaiting_warning_text';
   await ctx.answerCbQuery();
-  return ctx.reply("කරුණාකර Warning Message එක එවන්න ({time} ලෙස යෙදූ විට auto-delete වෙලාව replace වේ):");
+  return ctx.reply("Please send your Warning Message.\n\nPlaceholders available: {time}, {mention}");
 });
 
 bot.action('back_settings', async (ctx) => {
@@ -344,19 +356,16 @@ bot.action('back_settings', async (ctx) => {
   return ctx.deleteMessage();
 });
 
-// Admin /batch Command
 bot.command('batch', async (ctx) => {
   if (String(ctx.from.id) !== ADMIN_ID) return;
   adminStates[ctx.from.id] = 'awaiting_batch_start';
-  return ctx.reply('📦 Batch Creation:\nකරුණාකර Channel එකේ පළමු file එකේ Message Link එක (හෝ Message ID) එවන්න:');
+  return ctx.reply('📦 Batch Creation:\nPlease send the Message Link (or Message ID) of the first file in your channel:');
 });
 
-// Handle Media / Files forwarded to bot by Admin (Instant Single File Link)
 bot.on(['message'], async (ctx) => {
   const userId = ctx.from.id;
   const state = adminStates[userId];
 
-  // Handle Admin Input states
   if (String(userId) === ADMIN_ID && state) {
     const db = await getDb();
     if (state === 'awaiting_fsub_input') {
@@ -367,23 +376,23 @@ bot.on(['message'], async (ctx) => {
           { $push: { fsub_channels: { id: parts[0].trim(), title: parts[1].trim(), link: parts[2].trim() } } }
         );
         delete adminStates[userId];
-        return ctx.reply('✅ FSUB Channel එක සාර්ථකව add කළා!');
+        return ctx.reply('✅ FSUB Channel added successfully!');
       } else {
-        return ctx.reply('❌ වැරදි format එකක්. නැවත උත්සාහ කරන්න.');
+        return ctx.reply('❌ Invalid format. Please try again.');
       }
     } else if (state === 'awaiting_welcome_text') {
       await db.collection('settings').updateOne({ _id: 'config' }, { $set: { welcome_text: ctx.message.text } });
       delete adminStates[userId];
-      return ctx.reply('✅ Welcome Message එක update කළා!');
+      return ctx.reply('✅ Welcome Message updated successfully!');
     } else if (state === 'awaiting_warning_text') {
       await db.collection('settings').updateOne({ _id: 'config' }, { $set: { warning_text: ctx.message.text } });
       delete adminStates[userId];
-      return ctx.reply('✅ Warning Message එක update කළා!');
+      return ctx.reply('✅ Warning Message updated successfully!');
     } else if (state === 'awaiting_batch_start') {
       const text = ctx.message.text || '';
       const match = text.match(/\/(\d+)$/) || [null, text];
       adminStates[userId] = { type: 'batch', startId: parseInt(match[1]) };
-      return ctx.reply('නියමයි! දැන් අවසාන file එකේ Message Link එක (හෝ Message ID) එවන්න:');
+      return ctx.reply('Awesome! Now send the Message Link (or Message ID) of the last file:');
     } else if (typeof state === 'object' && state.type === 'batch') {
       const text = ctx.message.text || '';
       const match = text.match(/\/(\d+)$/) || [null, text];
@@ -396,12 +405,11 @@ bot.on(['message'], async (ctx) => {
         const link = `https://t.me/${BOT_USERNAME}?start=BATCH_${payload}`;
         return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n\n${link}\n\n✅ Batch created for messages ${startId} to ${endId}!`);
       } else {
-        return ctx.reply('❌ වැරදි Message IDs. නැවත /batch හරහා උත්සාහ කරන්න.');
+        return ctx.reply('❌ Invalid Message IDs. Please run /batch to start again.');
       }
     }
   }
 
-  // Admin sending a single media to store
   if (String(userId) === ADMIN_ID) {
     const isMedia = ctx.message.document || ctx.message.video || ctx.message.photo || ctx.message.audio;
     if (isMedia) {
@@ -416,13 +424,12 @@ bot.on(['message'], async (ctx) => {
         );
       } catch (e) {
         console.error('Error storing single file:', e);
-        return ctx.reply(`❌ File එක Database Channel එකට දැමීමට නොහැකි විය: ${e.message}`);
+        return ctx.reply(`❌ Could not save file to Database Channel: ${e.message}`);
       }
     }
   }
 });
 
-// Vercel Serverless Handler
 module.exports = async (req, res) => {
   if (req.method === 'POST') {
     try {
