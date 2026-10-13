@@ -40,10 +40,12 @@ const adminStates = {};
 
 // Helper: Format Placeholders
 function formatUserText(text, user) {
-  const firstName = user.first_name || '';
-  const lastName = user.last_name || '';
+  if (!text) return '';
+  const firstName = (user && user.first_name) ? user.first_name : '';
+  const lastName = (user && user.last_name) ? user.last_name : '';
   const fullName = `${firstName} ${lastName}`.trim() || 'User';
-  const mention = `<a href="tg://user?id=${user.id}">${fullName}</a>`;
+  const userId = user ? user.id : '';
+  const mention = userId ? `<a href="tg://user?id=${userId}">${fullName}</a>` : fullName;
 
   return text
     .replace(/{mention}/g, mention)
@@ -145,12 +147,14 @@ async function buildPanel(db) {
 
 // /start Handler
 bot.start(async (ctx) => {
+  if (!ctx.from) return;
+
   const db = await getDb();
   const settings = await getSettings(db);
   const payload = ctx.startPayload;
   const userId = ctx.from.id;
 
-  // Track Unique Users in MongoDB
+  // Safe Track Unique Users in MongoDB
   try {
     await db.collection('users').updateOne(
       { _id: userId },
@@ -258,7 +262,7 @@ bot.start(async (ctx) => {
 
 // Admin Panel Command
 bot.command('settings', async (ctx) => {
-  if (String(ctx.from.id) !== ADMIN_ID) return;
+  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
   const db = await getDb();
   const { panelText, keyboard } = await buildPanel(db);
   return ctx.reply(panelText, { parse_mode: 'Markdown', ...keyboard });
@@ -266,7 +270,7 @@ bot.command('settings', async (ctx) => {
 
 // Settings Callback Actions
 bot.action(/^(toggle_fsub|toggle_protect|toggle_autodel|set_time_\d+)$/, async (ctx) => {
-  if (String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
+  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const action = ctx.match[1];
   const db = await getDb();
   const col = db.collection('settings');
@@ -289,7 +293,7 @@ bot.action(/^(toggle_fsub|toggle_protect|toggle_autodel|set_time_\d+)$/, async (
 });
 
 bot.action('manage_fsub', async (ctx) => {
-  if (String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
+  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const db = await getDb();
   const settings = await getSettings(db);
 
@@ -313,6 +317,7 @@ bot.action('manage_fsub', async (ctx) => {
 });
 
 bot.action('add_fsub', async (ctx) => {
+  if (!ctx.from) return;
   adminStates[ctx.from.id] = 'awaiting_fsub_input';
   await ctx.answerCbQuery();
   return ctx.reply("Please send channel details in this format:\n\n`<Channel_ID>|<Channel_Title>|<Channel_Link>`\n\nExample:\n`-1004306300202|Backup Channel|https://t.me/yourbackup`");
@@ -327,12 +332,14 @@ bot.action(/^del_fsub_(.+)$/, async (ctx) => {
 });
 
 bot.action('edit_welcome', async (ctx) => {
+  if (!ctx.from) return;
   adminStates[ctx.from.id] = 'awaiting_welcome_text';
   await ctx.answerCbQuery();
   return ctx.reply("Please send your new /start Welcome Message.\n\nYou can use placeholders:\n• {mention}\n• {first_name}\n• {last_name}");
 });
 
 bot.action('edit_warning', async (ctx) => {
+  if (!ctx.from) return;
   adminStates[ctx.from.id] = 'awaiting_warning_text';
   await ctx.answerCbQuery();
   return ctx.reply("Please send your Warning Message.\n\nPlaceholders available: {time}, {mention}");
@@ -344,12 +351,13 @@ bot.action('back_settings', async (ctx) => {
 });
 
 bot.command('batch', async (ctx) => {
-  if (String(ctx.from.id) !== ADMIN_ID) return;
+  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
   adminStates[ctx.from.id] = 'awaiting_batch_start';
   return ctx.reply('📦 Batch Creation:\nPlease send the Message Link (or Message ID) of the first file in your channel:');
 });
 
 bot.on(['message'], async (ctx) => {
+  if (!ctx.from) return;
   const userId = ctx.from.id;
   const state = adminStates[userId];
 
@@ -417,7 +425,9 @@ bot.on(['message'], async (ctx) => {
 module.exports = async (req, res) => {
   if (req.method === 'POST') {
     try {
-      await bot.handleUpdate(req.body);
+      if (req.body && typeof req.body === 'object') {
+        await bot.handleUpdate(req.body);
+      }
     } catch (err) {
       console.error('Webhook error:', err);
     }
