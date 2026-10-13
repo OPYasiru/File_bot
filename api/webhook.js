@@ -98,12 +98,70 @@ function decodeOldCodeX(buf) {
   return null;
 }
 
+// Helper: Panel Builder with Stats
+async function buildPanel(db) {
+  const settings = await getSettings(db);
+  const totalUsers = await db.collection('users').countDocuments();
+  const pendingDeletions = await db.collection('deletion_queue').countDocuments();
+
+  const panelText = `⚙️ **Bot Control Panel**\n\n` +
+    `👥 **Total Users:** \`${totalUsers}\`\n` +
+    `⏳ **Pending Deletions:** \`${pendingDeletions}\`\n\n` +
+    `• Force Sub: ${settings.fsub_enabled ? '🟢 ON' : '🔴 OFF'}\n` +
+    `• Content Protect: ${settings.protect_content ? '🟢 ON' : '🔴 OFF'}\n` +
+    `• Auto-Delete: ${settings.auto_delete ? '🟢 ON' : '🔴 OFF'}\n` +
+    `• Delete Delay: ⏱️ ${formatDuration(settings.delete_delay_minutes)}\n` +
+    `• FSUB Channels: ${settings.fsub_channels.length}`;
+
+  const keyboard = Markup.inlineKeyboard([
+    [
+      Markup.button.callback(`FSUB: ${settings.fsub_enabled ? '🟢 ON' : '🔴 OFF'}`, 'toggle_fsub'),
+      Markup.button.callback(`Protect: ${settings.protect_content ? '🟢 ON' : '🔴 OFF'}`, 'toggle_protect')
+    ],
+    [
+      Markup.button.callback(`Auto-Delete: ${settings.auto_delete ? '🟢 ON' : '🔴 OFF'}`, 'toggle_autodel')
+    ],
+    [
+      Markup.button.callback('⏱️ 5 Mins', 'set_time_5'),
+      Markup.button.callback('⏱️ 15 Mins', 'set_time_15'),
+      Markup.button.callback('⏱️ 1 Hour', 'set_time_60')
+    ],
+    [
+      Markup.button.callback('⏱️ 3 Hours', 'set_time_180'),
+      Markup.button.callback('⏱️ 6 Hours', 'set_time_360'),
+      Markup.button.callback('⏱️ 24 Hours', 'set_time_1440')
+    ],
+    [
+      Markup.button.callback('📢 Manage FSUB Channels', 'manage_fsub')
+    ],
+    [
+      Markup.button.callback('✏️ Edit /start Text', 'edit_welcome'),
+      Markup.button.callback('✏️ Edit Warning Text', 'edit_warning')
+    ]
+  ]);
+
+  return { panelText, keyboard };
+}
+
 // /start Handler
 bot.start(async (ctx) => {
   const db = await getDb();
   const settings = await getSettings(db);
   const payload = ctx.startPayload;
   const userId = ctx.from.id;
+
+  // Track Unique Users in MongoDB
+  try {
+    await db.collection('users').updateOne(
+      { _id: userId },
+      { 
+        $set: { first_name: ctx.from.first_name \vert{}\vert{} '', username: ctx.from.username \vert{}\vert{} null, last_active: new Date() },$setOnInsert: { joined_at: new Date() }
+      },
+      { upsert: true }
+    );
+  } catch (err) {
+    console.error('Error tracking user:', err.message);
+  }
 
   if (payload) {
     // 1. Force Sub Check
@@ -202,45 +260,11 @@ bot.start(async (ctx) => {
 bot.command('settings', async (ctx) => {
   if (String(ctx.from.id) !== ADMIN_ID) return;
   const db = await getDb();
-  const settings = await getSettings(db);
-
-  const panelText = `⚙️ **Bot Control Panel**\n\n` +
-    `• Force Sub: ${settings.fsub_enabled ? '🟢 ON' : '🔴 OFF'}\n` +
-    `• Content Protect: ${settings.protect_content ? '🟢 ON' : '🔴 OFF'}\n` +
-    `• Auto-Delete: ${settings.auto_delete ? '🟢 ON' : '🔴 OFF'}\n` +
-    `• Delete Delay: ⏱️ ${formatDuration(settings.delete_delay_minutes)}\n` +
-    `• FSUB Channels: ${settings.fsub_channels.length}`;
-
-  const keyboard = Markup.inlineKeyboard([
-    [
-      Markup.button.callback(`FSUB: ${settings.fsub_enabled ? '🟢 ON' : '🔴 OFF'}`, 'toggle_fsub'),
-      Markup.button.callback(`Protect: ${settings.protect_content ? '🟢 ON' : '🔴 OFF'}`, 'toggle_protect')
-    ],
-    [
-      Markup.button.callback(`Auto-Delete: ${settings.auto_delete ? '🟢 ON' : '🔴 OFF'}`, 'toggle_autodel')
-    ],
-    [
-      Markup.button.callback('⏱️ 5 Mins', 'set_time_5'),
-      Markup.button.callback('⏱️ 15 Mins', 'set_time_15'),
-      Markup.button.callback('⏱️ 1 Hour', 'set_time_60')
-    ],
-    [
-      Markup.button.callback('⏱️ 3 Hours', 'set_time_180'),
-      Markup.button.callback('⏱️ 6 Hours', 'set_time_360'),
-      Markup.button.callback('⏱️ 24 Hours', 'set_time_1440')
-    ],
-    [
-      Markup.button.callback('📢 Manage FSUB Channels', 'manage_fsub')
-    ],
-    [
-      Markup.button.callback('✏️ Edit /start Text', 'edit_welcome'),
-      Markup.button.callback('✏️ Edit Warning Text', 'edit_warning')
-    ]
-  ]);
-
+  const { panelText, keyboard } = await buildPanel(db);
   return ctx.reply(panelText, { parse_mode: 'Markdown', ...keyboard });
 });
 
+// Settings Callback Actions
 bot.action(/^(toggle_fsub|toggle_protect|toggle_autodel|set_time_\d+)$/, async (ctx) => {
   if (String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const action = ctx.match[1];
@@ -260,40 +284,7 @@ bot.action(/^(toggle_fsub|toggle_protect|toggle_autodel|set_time_\d+)$/, async (
   }
 
   await ctx.answerCbQuery('Settings Updated!');
-  const updated = await getSettings(db);
-  const panelText = `⚙️ **Bot Control Panel**\n\n` +
-    `• Force Sub: ${updated.fsub_enabled ? '🟢 ON' : '🔴 OFF'}\n` +
-    `• Content Protect: ${updated.protect_content ? '🟢 ON' : '🔴 OFF'}\n` +
-    `• Auto-Delete: ${updated.auto_delete ? '🟢 ON' : '🔴 OFF'}\n` +
-    `• Delete Delay: ⏱️ ${formatDuration(updated.delete_delay_minutes)}\n` +
-    `• FSUB Channels: ${updated.fsub_channels.length}`;
-
-  const keyboard = Markup.inlineKeyboard([
-    [
-      Markup.button.callback(`FSUB: ${updated.fsub_enabled ? '🟢 ON' : '🔴 OFF'}`, 'toggle_fsub'),
-      Markup.button.callback(`Protect: ${updated.protect_content ? '🟢 ON' : '🔴 OFF'}`, 'toggle_protect')
-    ],
-    [
-      Markup.button.callback(`Auto-Delete: ${updated.auto_delete ? '🟢 ON' : '🔴 OFF'}`, 'toggle_autodel')
-    ],
-    [
-      Markup.button.callback('⏱️ 5 Mins', 'set_time_5'),
-      Markup.button.callback('⏱️ 15 Mins', 'set_time_15'),
-      Markup.button.callback('⏱️ 1 Hour', 'set_time_60')
-    ],
-    [
-      Markup.button.callback('⏱️ 3 Hours', 'set_time_180'),
-      Markup.button.callback('⏱️ 6 Hours', 'set_time_360'),
-      Markup.button.callback('⏱️ 24 Hours', 'set_time_1440')
-    ],
-    [
-      Markup.button.callback('📢 Manage FSUB Channels', 'manage_fsub')
-    ],
-    [
-      Markup.button.callback('✏️ Edit /start Text', 'edit_welcome'),
-      Markup.button.callback('✏️ Edit Warning Text', 'edit_warning')
-    ]
-  ]);
+  const { panelText, keyboard } = await buildPanel(db);
   return ctx.editMessageText(panelText, { parse_mode: 'Markdown', ...keyboard });
 });
 
@@ -399,7 +390,6 @@ bot.on(['message'], async (ctx) => {
       if (startId && endId && startId <= endId) {
         const payload = Buffer.from(`${startId}-${endId}`).toString('base64');
         const link = `https://t.me/${BOT_USERNAME}?start=BATCH_${payload}`;
-        // ඔයා ඉල්ලූ ආකෘතියට පමණක් link එක යැවීම
         return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${link}`);
       } else {
         return ctx.reply('❌ Invalid Message IDs. Please run /batch to start again.');
@@ -415,7 +405,6 @@ bot.on(['message'], async (ctx) => {
         const encoded = Buffer.from(String(copied.message_id)).toString('base64');
         const fileLink = `https://t.me/${BOT_USERNAME}?start=${encoded}`;
 
-        // තනි file එකක් forward කළ විටද screenshot එකේ ආකෘතියට පමණක් link එක යැවීම
         return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${fileLink}`);
       } catch (e) {
         console.error('Error storing single file:', e);
