@@ -43,7 +43,7 @@ function formatUserText(text, user) {
   if (!text) return '';
   const firstName = (user && user.first_name) ? user.first_name : '';
   const lastName = (user && user.last_name) ? user.last_name : '';
-  const fullName = `${firstName} ${lastName}`.trim() || 'User';
+  const fullName = `${firstName}${lastName}`.trim() || 'User';
   const userId = user ? user.id : '';
   const mention = userId ? `<a href="tg://user?id=${userId}">${fullName}</a>` : fullName;
 
@@ -161,7 +161,12 @@ bot.start(async (ctx) => {
     await db.collection('users').updateOne(
       { _id: userId },
       { 
-        $set: { first_name: fName, username: uName, last_active: new Date() },$setOnInsert: { joined_at: new Date() }
+        $set: { 
+          first_name: fName, 
+          username: uName, 
+          last_active: new Date() 
+        },
+        $setOnInsert: { joined_at: new Date() }
       },
       { upsert: true }
     );
@@ -233,7 +238,7 @@ bot.start(async (ctx) => {
         });
         sentMsgIds.push(res.message_id);
       } catch (err) {
-        console.warn(`Skipped missing/deleted msg ${msgId}: ${err.message}`);
+        console.warn(`Skipped missing/deleted msg ${msgId}:${err.message}`);
       }
     }
 
@@ -268,6 +273,22 @@ bot.command('settings', async (ctx) => {
   const db = await getDb();
   const { panelText, keyboard } = await buildPanel(db);
   return ctx.reply(panelText, { parse_mode: 'Markdown', ...keyboard });
+});
+
+// Broadcast Command
+bot.command('broadcast', async (ctx) => {
+  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
+  adminStates[ctx.from.id] = 'awaiting_broadcast_msg';
+  return ctx.reply('📢 **Broadcast Mode:**\n\nPlease send or forward the message you want to broadcast to all users (Text, Photo, Video, etc.).\n\nSend /cancel to abort.');
+});
+
+// Cancel command for admin operations
+bot.command('cancel', async (ctx) => {
+  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
+  if (adminStates[ctx.from.id]) {
+    delete adminStates[ctx.from.id];
+    return ctx.reply('🚫 Operation cancelled.');
+  }
 });
 
 // Settings Callback Actions
@@ -365,6 +386,34 @@ bot.on(['message'], async (ctx) => {
 
   if (String(userId) === ADMIN_ID && state) {
     const db = await getDb();
+
+    // 1. Handling Broadcast
+    if (state === 'awaiting_broadcast_msg') {
+      delete adminStates[userId];
+      const statusMsg = await ctx.reply('⏳ Broadcasting message in progress...');
+
+      const users = await db.collection('users').find({}, { projection: { _id: 1 } }).toArray();
+      let success = 0;
+      let failed = 0;
+
+      for (const u of users) {
+        try {
+          await ctx.telegram.copyMessage(u._id, ctx.chat.id, ctx.message.message_id);
+          success++;
+        } catch (e) {
+          failed++;
+        }
+      }
+
+      return ctx.telegram.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        null,
+        `📢 **Broadcast Completed!**\n\n✅ Success: \`${success}\`\n❌ Failed: \`${failed}\`\n👥 Total Targeted: \`${users.length}\``,
+        { parse_mode: 'Markdown' }
+      );
+    }
+
     if (state === 'awaiting_fsub_input') {
       const parts = ctx.message.text ? ctx.message.text.split('|') : [];
       if (parts.length === 3) {
