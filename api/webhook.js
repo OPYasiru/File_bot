@@ -36,7 +36,6 @@ async function getSettings(db) {
 }
 
 const bot = new Telegraf(BOT_TOKEN);
-const adminStates = {};
 
 // Helper: Format Placeholders
 function formatUserText(text, user) {
@@ -278,17 +277,23 @@ bot.command('settings', async (ctx) => {
 // Broadcast Command
 bot.command('broadcast', async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
-  adminStates[ctx.from.id] = 'awaiting_broadcast_msg';
-  return ctx.reply('📢 **Broadcast Mode:**\n\nPlease send or forward the message you want to broadcast to all users (Text, Photo, Video, etc.).\n\nSend /cancel to abort.');
+  const db = await getDb();
+  await db.collection('settings').updateOne(
+    { _id: 'config' },
+    { $set: { admin_state: { mode: 'awaiting_broadcast_msg' } } }
+  );
+  return ctx.reply('📢 **Broadcast Mode:**\n\nPlease send or forward the message you want to broadcast to all users (Text, Photo, Video, etc.).\n\nSend /cancel to abort.', { parse_mode: 'Markdown' });
 });
 
-// Cancel command for admin operations
+// Cancel command
 bot.command('cancel', async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
-  if (adminStates[ctx.from.id]) {
-    delete adminStates[ctx.from.id];
-    return ctx.reply('🚫 Operation cancelled.');
-  }
+  const db = await getDb();
+  await db.collection('settings').updateOne(
+    { _id: 'config' },
+    { $unset: { admin_state: "" } }
+  );
+  return ctx.reply('🚫 Operation cancelled.');
 });
 
 // Settings Callback Actions
@@ -340,10 +345,14 @@ bot.action('manage_fsub', async (ctx) => {
 });
 
 bot.action('add_fsub', async (ctx) => {
-  if (!ctx.from) return;
-  adminStates[ctx.from.id] = 'awaiting_fsub_input';
+  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
+  const db = await getDb();
+  await db.collection('settings').updateOne(
+    { _id: 'config' },
+    { $set: { admin_state: { mode: 'awaiting_fsub_input' } } }
+  );
   await ctx.answerCbQuery();
-  return ctx.reply("Please send channel details in this format:\n\n`<Channel_ID>|<Channel_Title>|<Channel_Link>`\n\nExample:\n`-1004306300202|Backup Channel|https://t.me/yourbackup`");
+  return ctx.reply("Please send channel details in this format:\n\n`<Channel_ID>|<Channel_Title>|<Channel_Link>`\n\nExample:\n`-1004306300202|Backup Channel|https://t.me/yourbackup`", { parse_mode: 'Markdown' });
 });
 
 bot.action(/^del_fsub_(.+)$/, async (ctx) => {
@@ -355,15 +364,23 @@ bot.action(/^del_fsub_(.+)$/, async (ctx) => {
 });
 
 bot.action('edit_welcome', async (ctx) => {
-  if (!ctx.from) return;
-  adminStates[ctx.from.id] = 'awaiting_welcome_text';
+  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
+  const db = await getDb();
+  await db.collection('settings').updateOne(
+    { _id: 'config' },
+    { $set: { admin_state: { mode: 'awaiting_welcome_text' } } }
+  );
   await ctx.answerCbQuery();
   return ctx.reply("Please send your new /start Welcome Message.\n\nYou can use placeholders:\n• {mention}\n• {first_name}\n• {last_name}");
 });
 
 bot.action('edit_warning', async (ctx) => {
-  if (!ctx.from) return;
-  adminStates[ctx.from.id] = 'awaiting_warning_text';
+  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
+  const db = await getDb();
+  await db.collection('settings').updateOne(
+    { _id: 'config' },
+    { $set: { admin_state: { mode: 'awaiting_warning_text' } } }
+  );
   await ctx.answerCbQuery();
   return ctx.reply("Please send your Warning Message.\n\nPlaceholders available: {time}, {mention}");
 });
@@ -375,88 +392,111 @@ bot.action('back_settings', async (ctx) => {
 
 bot.command('batch', async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
-  adminStates[ctx.from.id] = 'awaiting_batch_start';
+  const db = await getDb();
+  await db.collection('settings').updateOne(
+    { _id: 'config' },
+    { $set: { admin_state: { mode: 'awaiting_batch_start' } } }
+  );
   return ctx.reply('📦 Batch Creation:\nPlease send the Message Link (or Message ID) of the first file in your channel:');
 });
 
 bot.on(['message'], async (ctx) => {
   if (!ctx.from) return;
   const userId = ctx.from.id;
-  const state = adminStates[userId];
-
-  if (String(userId) === ADMIN_ID && state) {
-    const db = await getDb();
-
-    // 1. Handling Broadcast
-    if (state === 'awaiting_broadcast_msg') {
-      delete adminStates[userId];
-      const statusMsg = await ctx.reply('⏳ Broadcasting message in progress...');
-
-      const users = await db.collection('users').find({}, { projection: { _id: 1 } }).toArray();
-      let success = 0;
-      let failed = 0;
-
-      for (const u of users) {
-        try {
-          await ctx.telegram.copyMessage(u._id, ctx.chat.id, ctx.message.message_id);
-          success++;
-        } catch (e) {
-          failed++;
-        }
-      }
-
-      return ctx.telegram.editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        null,
-        `📢 **Broadcast Completed!**\n\n✅ Success: \`${success}\`\n❌ Failed: \`${failed}\`\n👥 Total Targeted: \`${users.length}\``,
-        { parse_mode: 'Markdown' }
-      );
-    }
-
-    if (state === 'awaiting_fsub_input') {
-      const parts = ctx.message.text ? ctx.message.text.split('|') : [];
-      if (parts.length === 3) {
-        await db.collection('settings').updateOne(
-          { _id: 'config' },
-          { $push: { fsub_channels: { id: parts[0].trim(), title: parts[1].trim(), link: parts[2].trim() } } }
-        );
-        delete adminStates[userId];
-        return ctx.reply('✅ FSUB Channel added successfully!');
-      } else {
-        return ctx.reply('❌ Invalid format. Please try again.');
-      }
-    } else if (state === 'awaiting_welcome_text') {
-      await db.collection('settings').updateOne({ _id: 'config' }, { $set: { welcome_text: ctx.message.text } });
-      delete adminStates[userId];
-      return ctx.reply('✅ Welcome Message updated successfully!');
-    } else if (state === 'awaiting_warning_text') {
-      await db.collection('settings').updateOne({ _id: 'config' }, { $set: { warning_text: ctx.message.text } });
-      delete adminStates[userId];
-      return ctx.reply('✅ Warning Message updated successfully!');
-    } else if (state === 'awaiting_batch_start') {
-      const text = ctx.message.text || '';
-      const match = text.match(/\/(\d+)$/) || [null, text];
-      adminStates[userId] = { type: 'batch', startId: parseInt(match[1]) };
-      return ctx.reply('Awesome! Now send the Message Link (or Message ID) of the last file:');
-    } else if (typeof state === 'object' && state.type === 'batch') {
-      const text = ctx.message.text || '';
-      const match = text.match(/\/(\d+)$/) || [null, text];
-      const endId = parseInt(match[1]);
-      const startId = state.startId;
-      delete adminStates[userId];
-
-      if (startId && endId && startId <= endId) {
-        const payload = Buffer.from(`${startId}-${endId}`).toString('base64');
-        const link = `https://t.me/${BOT_USERNAME}?start=BATCH_${payload}`;
-        return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${link}`);
-      } else {
-        return ctx.reply('❌ Invalid Message IDs. Please run /batch to start again.');
-      }
-    }
-  }
 
   if (String(userId) === ADMIN_ID) {
+    const db = await getDb();
+    const config = await db.collection('settings').findOne({ _id: 'config' });
+    const state = config && config.admin_state ? config.admin_state : null;
+
+    if (state && state.mode) {
+      // 1. Handling Broadcast
+      if (state.mode === 'awaiting_broadcast_msg') {
+        await db.collection('settings').updateOne({ _id: 'config' }, { $unset: { admin_state: "" } });
+        const statusMsg = await ctx.reply('⏳ Broadcasting message in progress...');
+
+        const users = await db.collection('users').find({}, { projection: { _id: 1 } }).toArray();
+        if (users.length === 0) {
+          return ctx.telegram.editMessageText(
+            ctx.chat.id,
+            statusMsg.message_id,
+            null,
+            '⚠️ Total users in database is 0. No users to broadcast yet!'
+          );
+        }
+
+        let success = 0;
+        let failed = 0;
+
+        for (const u of users) {
+          try {
+            await ctx.telegram.copyMessage(u._id, ctx.chat.id, ctx.message.message_id);
+            success++;
+          } catch (e) {
+            failed++;
+          }
+        }
+
+        return ctx.telegram.editMessageText(
+          ctx.chat.id,
+          statusMsg.message_id,
+          null,
+          `📢 **Broadcast Completed!**\n\n✅ Success: \`${success}\`\n❌ Failed: \`${failed}\`\n👥 Total Targeted: \`${users.length}\``,
+          { parse_mode: 'Markdown' }
+        );
+      }
+
+      if (state.mode === 'awaiting_fsub_input') {
+        const parts = ctx.message.text ? ctx.message.text.split('|') : [];
+        if (parts.length === 3) {
+          await db.collection('settings').updateOne(
+            { _id: 'config' },
+            { 
+              $push: { fsub_channels: { id: parts[0].trim(), title: parts[1].trim(), link: parts[2].trim() } },$unset: { admin_state: "" }
+            }
+          );
+          return ctx.reply('✅ FSUB Channel added successfully!');
+        } else {
+          return ctx.reply('❌ Invalid format. Please try again.');
+        }
+      } else if (state.mode === 'awaiting_welcome_text') {
+        await db.collection('settings').updateOne(
+          { _id: 'config' }, 
+          { $set: { welcome_text: ctx.message.text },$unset: { admin_state: "" } }
+        );
+        return ctx.reply('✅ Welcome Message updated successfully!');
+      } else if (state.mode === 'awaiting_warning_text') {
+        await db.collection('settings').updateOne(
+          { _id: 'config' }, 
+          { $set: { warning_text: ctx.message.text },$unset: { admin_state: "" } }
+        );
+        return ctx.reply('✅ Warning Message updated successfully!');
+      } else if (state.mode === 'awaiting_batch_start') {
+        const text = ctx.message.text || '';
+        const match = text.match(/\/(\d+)$/) || [null, text];
+        await db.collection('settings').updateOne(
+          { _id: 'config' }, 
+          { $set: { admin_state: { mode: 'awaiting_batch_end', startId: parseInt(match[1]) } } }
+        );
+        return ctx.reply('Awesome! Now send the Message Link (or Message ID) of the last file:');
+      } else if (state.mode === 'awaiting_batch_end') {
+        const text = ctx.message.text || '';
+        const match = text.match(/\/(\d+)$/) || [null, text];
+        const endId = parseInt(match[1]);
+        const startId = state.startId;
+        await db.collection('settings').updateOne({ _id: 'config' }, { $unset: { admin_state: "" } });
+
+        if (startId && endId && startId <= endId) {
+          const payload = Buffer.from(`${startId}-${endId}`).toString('base64');
+          const link = `https://t.me/${BOT_USERNAME}?start=BATCH_${payload}`;
+          return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${link}`);
+        } else {
+          return ctx.reply('❌ Invalid Message IDs. Please run /batch to start again.');
+        }
+      }
+    }
+
+    // Media upload to DB channel
     const isMedia = ctx.message.document || ctx.message.video || ctx.message.photo || ctx.message.audio;
     if (isMedia) {
       try {
