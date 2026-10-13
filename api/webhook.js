@@ -513,6 +513,18 @@ bot.on(['message'], async (ctx) => {
   }
 });
 
+// Admin ට පමණක් Commands පෙනෙන පරිදි Scope එක සැකසීම
+bot.telegram.setMyCommands([
+  { command: 'start', description: 'Start the bot & get files' },
+  { command: 'settings', description: 'Open admin control panel' },
+  { command: 'batch', description: 'Create a batch link for files' },
+  { command: 'broadcast', description: 'Broadcast message to users' },
+  { command: 'cancel', description: 'Cancel current operation' }
+], {
+  scope: { type: 'chat', chat_id: Number(ADMIN_ID) }
+}).catch(err => console.error('Error setting admin commands:', err.message));
+
+
 module.exports = async (req, res) => {
   if (req.method === 'POST') {
     try {
