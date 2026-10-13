@@ -156,10 +156,12 @@ bot.start(async (ctx) => {
 
   // Safe Track Unique Users in MongoDB
   try {
+    const fName = ctx.from.first_name || '';
+    const uName = ctx.from.username || null;
     await db.collection('users').updateOne(
       { _id: userId },
       { 
-        $set: { first_name: ctx.from.first_name \vert{}\vert{} '', username: ctx.from.username \vert{}\vert{} null, last_active: new Date() },$setOnInsert: { joined_at: new Date() }
+        $set: { first_name: fName, username: uName, last_active: new Date() },$setOnInsert: { joined_at: new Date() }
       },
       { upsert: true }
     );
