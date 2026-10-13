@@ -35,6 +35,18 @@ async function getSettings(db) {
   return s;
 }
 
+// User Tracking Helper
+async function saveUser(db, user) {
+  if (!user || !user.id) return;
+  await db.collection('bot_users').updateOne(
+    { user_id: user.id },
+    {
+      $set: { first_name: user.first_name \vert{}\vert{} '', username: user.username \vert{}\vert{} '', last_active: new Date() },$setOnInsert: { joined_at: new Date() }
+    },
+    { upsert: true }
+  );
+}
+
 const bot = new Telegraf(BOT_TOKEN);
 const adminStates = {};
 
@@ -101,6 +113,7 @@ function decodeOldCodeX(buf) {
 // /start Handler
 bot.start(async (ctx) => {
   const db = await getDb();
+  await saveUser(db, ctx.from);
   const settings = await getSettings(db);
   const payload = ctx.startPayload;
   const userId = ctx.from.id;
@@ -196,6 +209,32 @@ bot.start(async (ctx) => {
 
   const formattedWelcome = formatUserText(settings.welcome_text, ctx.from);
   return ctx.reply(formattedWelcome, { parse_mode: 'HTML' });
+});
+
+// Bot Analytics / Stats Command
+bot.command('stats', async (ctx) => {
+  if (String(ctx.from.id) !== ADMIN_ID) return;
+  const db = await getDb();
+  const settings = await getSettings(db);
+
+  const totalUsers = await db.collection('bot_users').countDocuments();
+  const pendingDeletes = await db.collection('deletion_queue').countDocuments();
+
+  const statsText = `📊 <b>Bot Analytics & Stats</b>\n\n` +
+    `👥 <b>Total Active Users:</b> <code>${totalUsers}</code>\n` +
+    `🗑 <b>Pending Auto-Deletes:</b> <code>${pendingDeletes}</code>\n` +
+    `📢 <b>FSUB Channels Active:</b> <code>${settings.fsub_channels.length}</code>\n` +
+    `⏱ <b>Auto-Delete Delay:</b> <code>${formatDuration(settings.delete_delay_minutes)}</code>\n` +
+    `🛡 <b>Content Protection:</b> <code>${settings.protect_content ? 'Enabled' : 'Disabled'}</code>`;
+
+  return ctx.reply(statsText, { parse_mode: 'HTML' });
+});
+
+// Broadcast Command Setup
+bot.command('broadcast', async (ctx) => {
+  if (String(ctx.from.id) !== ADMIN_ID) return;
+  adminStates[ctx.from.id] = 'awaiting_broadcast_message';
+  return ctx.reply('📢 <b>Broadcast Setup:</b>\n\nPlease send or forward the message you want to broadcast to all users.', { parse_mode: 'HTML' });
 });
 
 // Admin Panel Command
@@ -364,6 +403,37 @@ bot.on(['message'], async (ctx) => {
 
   if (String(userId) === ADMIN_ID && state) {
     const db = await getDb();
+
+    // Broadcast Execution
+    if (state === 'awaiting_broadcast_message') {
+      delete adminStates[userId];
+      const users = await db.collection('bot_users').find({}).toArray();
+      const statusMsg = await ctx.reply(`🚀 Broadcasting started to ${users.length} users...`);
+
+      let successful = 0;
+      let failed = 0;
+
+      for (const u of users) {
+        try {
+          await ctx.telegram.copyMessage(u.user_id, ctx.chat.id, ctx.message.message_id);
+          successful++;
+        } catch (err) {
+          failed++;
+        }
+      }
+
+      return ctx.telegram.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        null,
+        `✅ <b>Broadcast Completed!</b>\n\n` +
+        `👥 <b>Total Users:</b> <code>${users.length}</code>\n` +
+        `🟢 <b>Successfully Sent:</b> <code>${successful}</code>\n` +
+        `🔴 <b>Failed/Blocked:</b> <code>${failed}</code>`,
+        { parse_mode: 'HTML' }
+      );
+    }
+
     if (state === 'awaiting_fsub_input') {
       const parts = ctx.message.text ? ctx.message.text.split('|') : [];
       if (parts.length === 3) {
@@ -399,7 +469,6 @@ bot.on(['message'], async (ctx) => {
       if (startId && endId && startId <= endId) {
         const payload = Buffer.from(`${startId}-${endId}`).toString('base64');
         const link = `https://t.me/${BOT_USERNAME}?start=BATCH_${payload}`;
-        // ඔයා ඉල්ලූ ආකෘතියට පමණක් link එක යැවීම
         return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${link}`);
       } else {
         return ctx.reply('❌ Invalid Message IDs. Please run /batch to start again.');
@@ -415,7 +484,6 @@ bot.on(['message'], async (ctx) => {
         const encoded = Buffer.from(String(copied.message_id)).toString('base64');
         const fileLink = `https://t.me/${BOT_USERNAME}?start=${encoded}`;
 
-        // තනි file එකක් forward කළ විටද screenshot එකේ ආකෘතියට පමණක් link එක යැවීම
         return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${fileLink}`);
       } catch (e) {
         console.error('Error storing single file:', e);
