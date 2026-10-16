@@ -180,6 +180,7 @@ bot.start(async (ctx) => {
 
     let msgIdsToSend = [];
 
+    // Old DW5 Link Logic
     if (payload.startsWith('DW5')) {
       try {
         const rawBuf = safeBase64Decode(payload);
@@ -191,6 +192,7 @@ bot.start(async (ctx) => {
         console.error('Old link decode error:', err);
       }
     } 
+    // Continuous Range Batch Logic
     else if (payload.startsWith('BATCH_')) {
       try {
         const b64Part = payload.replace('BATCH_', '');
@@ -203,6 +205,17 @@ bot.start(async (ctx) => {
         console.error('Batch decode error:', err);
       }
     } 
+    // Custom Selected Multi-Files Logic (Only chosen IDs)
+    else if (payload.startsWith('MULTI_')) {
+      try {
+        const b64Part = payload.replace('MULTI_', '');
+        const idsStr = safeBase64Decode(b64Part).toString('utf-8');
+        msgIdsToSend = idsStr.split(',').map(Number).filter(id => !isNaN(id) && id > 0);
+      } catch (err) {
+        console.error('Multi decode error:', err);
+      }
+    } 
+    // Single File Logic
     else {
       try {
         const singleId = Number(safeBase64Decode(payload).toString('utf-8'));
@@ -404,7 +417,6 @@ bot.action('batch_mode_multi', async (ctx) => {
   await ctx.answerCbQuery();
   await ctx.deleteMessage().catch(() => {});
 
-  // Send persistent reply keyboard that stays at bottom of screen
   return ctx.reply(
     'Forward your selected files from DB Channel now.\nTap "🏁 Done Batch" below when finished:',
     Markup.keyboard([
@@ -446,13 +458,12 @@ bot.on(['message'], async (ctx) => {
 
     const text = ctx.message.text ? ctx.message.text.trim() : '';
 
-    // Handle persistent keyboard Cancel button
     if (text === '❌ Cancel') {
       await db.collection('settings').updateOne({ _id: 'config' }, { $unset: { admin_state: "" } });
       return ctx.reply('🚫 Operation cancelled.', Markup.removeKeyboard());
     }
 
-    // Handle persistent keyboard Done button
+    // Finish Selected Multi-Batch
     if (text === '🏁 Done Batch') {
       if (state && state.mode === 'awaiting_forward_multi') {
         const allIds = state.ids || [];
@@ -462,10 +473,10 @@ bot.on(['message'], async (ctx) => {
 
         await db.collection('settings').updateOne({ _id: 'config' }, { $unset: { admin_state: "" } });
 
-        const minId = Math.min(...allIds);
-        const maxId = Math.max(...allIds);
-        const payload = Buffer.from(`${minId}-${maxId}`).toString('base64');
-        const link = `https://t.me/${BOT_USERNAME}?start=BATCH_${payload}`;
+        // Sort ascending so files deliver in order
+        allIds.sort((a, b) => a - b);
+        const payload = Buffer.from(allIds.join(',')).toString('base64');
+        const link = `https://t.me/${BOT_USERNAME}?start=MULTI_${payload}`;
 
         return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${link}`, Markup.removeKeyboard());
       } else {
