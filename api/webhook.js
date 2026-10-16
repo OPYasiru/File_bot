@@ -6,6 +6,7 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const DB_CHANNEL_ID = String(process.env.DB_CHANNEL_ID || '-1004365559436').trim();
 const ADMIN_ID = String(process.env.ADMIN_ID || '5411921025').trim();
 const BOT_USERNAME = process.env.BOT_USERNAME || 'LankaFile_bot';
+const POST_BOT_USERNAME = 'HotLanka_Bot';
 
 let cachedClient = null;
 async function getDb() {
@@ -97,6 +98,15 @@ function decodeOldCodeX(buf) {
   return null;
 }
 
+// Helper: Post Link Buttons Builder
+function makeLinkButtons(fileLink) {
+  const shareText = encodeURIComponent(`🔥 Hot Lanka Exclusive 🔥\n${fileLink}`);
+  return Markup.inlineKeyboard([
+    [Markup.button.url('🤖 Send to Post Bot', `https://t.me/${POST_BOT_USERNAME}`)],
+    [Markup.button.url('🚀 Quick Share', `https://t.me/share/url?url=${encodeURIComponent(fileLink)}&text=${shareText}`)]
+  ]);
+}
+
 async function buildPanel(db) {
   const settings = await getSettings(db);
   const totalUsers = await db.collection('users').countDocuments();
@@ -180,7 +190,6 @@ bot.start(async (ctx) => {
 
     let msgIdsToSend = [];
 
-    // Old DW5 Link Logic
     if (payload.startsWith('DW5')) {
       try {
         const rawBuf = safeBase64Decode(payload);
@@ -192,7 +201,6 @@ bot.start(async (ctx) => {
         console.error('Old link decode error:', err);
       }
     } 
-    // Continuous Range Batch Logic
     else if (payload.startsWith('BATCH_')) {
       try {
         const b64Part = payload.replace('BATCH_', '');
@@ -205,7 +213,6 @@ bot.start(async (ctx) => {
         console.error('Batch decode error:', err);
       }
     } 
-    // Custom Selected Multi-Files Logic (Only chosen IDs)
     else if (payload.startsWith('MULTI_')) {
       try {
         const b64Part = payload.replace('MULTI_', '');
@@ -215,7 +222,6 @@ bot.start(async (ctx) => {
         console.error('Multi decode error:', err);
       }
     } 
-    // Single File Logic
     else {
       try {
         const singleId = Number(safeBase64Decode(payload).toString('utf-8'));
@@ -473,12 +479,12 @@ bot.on(['message'], async (ctx) => {
 
         await db.collection('settings').updateOne({ _id: 'config' }, { $unset: { admin_state: "" } });
 
-        // Sort ascending so files deliver in order
         allIds.sort((a, b) => a - b);
         const payload = Buffer.from(allIds.join(',')).toString('base64');
         const link = `https://t.me/${BOT_USERNAME}?start=MULTI_${payload}`;
 
-        return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${link}`, Markup.removeKeyboard());
+        await ctx.reply('Selected batch processed.', Markup.removeKeyboard());
+        return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${link}`, makeLinkButtons(link));
       } else {
         return ctx.reply('No active batch session found.', Markup.removeKeyboard());
       }
@@ -578,7 +584,7 @@ bot.on(['message'], async (ctx) => {
         if (startId && endId && startId <= endId) {
           const payload = Buffer.from(`${startId}-${endId}`).toString('base64');
           const link = `https://t.me/${BOT_USERNAME}?start=BATCH_${payload}`;
-          return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${link}`);
+          return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${link}`, makeLinkButtons(link));
         } else {
           return ctx.reply('❌ Invalid IDs. Please run /batch to start again.');
         }
@@ -604,14 +610,14 @@ bot.on(['message'], async (ctx) => {
         if (ctx.message.forward_from_chat && String(ctx.message.forward_from_chat.id) === DB_CHANNEL_ID && ctx.message.forward_from_message_id) {
           const encoded = Buffer.from(String(ctx.message.forward_from_message_id)).toString('base64');
           const fileLink = `https://t.me/${BOT_USERNAME}?start=${encoded}`;
-          return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${fileLink}`);
+          return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${fileLink}`, makeLinkButtons(fileLink));
         }
 
         const copied = await ctx.telegram.copyMessage(DB_CHANNEL_ID, ctx.chat.id, ctx.message.message_id);
         const encoded = Buffer.from(String(copied.message_id)).toString('base64');
         const fileLink = `https://t.me/${BOT_USERNAME}?start=${encoded}`;
 
-        return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${fileLink}`);
+        return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${fileLink}`, makeLinkButtons(fileLink));
       } catch (e) {
         console.error('Error storing single file:', e);
         return ctx.reply(`❌ Could not save file to Database Channel: ${e.message}`);
