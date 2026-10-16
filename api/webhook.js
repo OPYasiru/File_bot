@@ -37,7 +37,6 @@ async function getSettings(db) {
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// Helper: Format Placeholders
 function formatUserText(text, user) {
   if (!text) return '';
   const firstName = (user && user.first_name) ? user.first_name : '';
@@ -52,7 +51,6 @@ function formatUserText(text, user) {
     .replace(/{last_name}/g, lastName);
 }
 
-// Helper: Check FSUB
 async function checkFsub(ctx, userId, channels) {
   const notJoined = [];
   for (const ch of channels) {
@@ -99,7 +97,6 @@ function decodeOldCodeX(buf) {
   return null;
 }
 
-// Helper: Panel Builder with Stats
 async function buildPanel(db) {
   const settings = await getSettings(db);
   const totalUsers = await db.collection('users').countDocuments();
@@ -144,7 +141,6 @@ async function buildPanel(db) {
   return { panelText, keyboard };
 }
 
-// /start Handler
 bot.start(async (ctx) => {
   if (!ctx.from) return;
 
@@ -153,7 +149,6 @@ bot.start(async (ctx) => {
   const payload = ctx.startPayload;
   const userId = ctx.from.id;
 
-  // Safe Track Unique Users in MongoDB
   try {
     const fName = ctx.from.first_name || '';
     const uName = ctx.from.username || null;
@@ -174,7 +169,6 @@ bot.start(async (ctx) => {
   }
 
   if (payload) {
-    // 1. Force Sub Check
     if (settings.fsub_enabled && settings.fsub_channels && settings.fsub_channels.length > 0) {
       const pendingChannels = await checkFsub(ctx, userId, settings.fsub_channels);
       if (pendingChannels.length > 0) {
@@ -186,7 +180,6 @@ bot.start(async (ctx) => {
 
     let msgIdsToSend = [];
 
-    // Old Link Logic
     if (payload.startsWith('DW5')) {
       try {
         const rawBuf = safeBase64Decode(payload);
@@ -198,7 +191,6 @@ bot.start(async (ctx) => {
         console.error('Old link decode error:', err);
       }
     } 
-    // Batch Logic
     else if (payload.startsWith('BATCH_')) {
       try {
         const b64Part = payload.replace('BATCH_', '');
@@ -211,7 +203,6 @@ bot.start(async (ctx) => {
         console.error('Batch decode error:', err);
       }
     } 
-    // New Single File Logic
     else {
       try {
         const singleId = Number(safeBase64Decode(payload).toString('utf-8'));
@@ -227,7 +218,6 @@ bot.start(async (ctx) => {
       return ctx.reply('❌ Invalid or expired link.');
     }
 
-    // Copy messages
     const sentMsgIds = [];
 
     for (const msgId of msgIdsToSend) {
@@ -266,7 +256,6 @@ bot.start(async (ctx) => {
   return ctx.reply(formattedWelcome, { parse_mode: 'HTML' });
 });
 
-// Admin Panel Command
 bot.command('settings', async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
   const db = await getDb();
@@ -274,7 +263,6 @@ bot.command('settings', async (ctx) => {
   return ctx.reply(panelText, { parse_mode: 'Markdown', ...keyboard });
 });
 
-// Broadcast Command
 bot.command('broadcast', async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
   const db = await getDb();
@@ -285,7 +273,6 @@ bot.command('broadcast', async (ctx) => {
   return ctx.reply('📢 **Broadcast Mode:**\n\nPlease send or forward the message you want to broadcast to all users (Text, Photo, Video, etc.).\n\nSend /cancel to abort.', { parse_mode: 'Markdown' });
 });
 
-// Cancel command
 bot.command('cancel', async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
   const db = await getDb();
@@ -296,7 +283,6 @@ bot.command('cancel', async (ctx) => {
   return ctx.reply('🚫 Operation cancelled.');
 });
 
-// Settings Callback Actions
 bot.action(/^(toggle_fsub|toggle_protect|toggle_autodel|set_time_\d+)$/, async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const action = ctx.match[1];
@@ -390,7 +376,7 @@ bot.action('back_settings', async (ctx) => {
   return ctx.deleteMessage();
 });
 
-// New Interactive /batch Command
+// Interactive /batch Command
 bot.command('batch', async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
 
@@ -407,7 +393,6 @@ bot.command('batch', async (ctx) => {
   return ctx.reply('Select Batch Mode:', keyboard);
 });
 
-// Batch Mode Actions
 bot.action('batch_mode_multi', async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const db = await getDb();
@@ -416,7 +401,11 @@ bot.action('batch_mode_multi', async (ctx) => {
     { $set: { admin_state: { mode: 'awaiting_forward_multi', ids: [] } } }
   );
   await ctx.answerCbQuery();
-  return ctx.editMessageText('Forward your selected files from DB Channel now.\nSend /cancel to abort.');
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('🏁 Done / Finish Batch', 'batch_multi_finish')],
+    [Markup.button.callback('❌ Cancel', 'batch_mode_cancel')]
+  ]);
+  return ctx.editMessageText('Forward your selected files from DB Channel now.\nClick "Done" when finished forwarding:', keyboard);
 });
 
 bot.action('batch_mode_range', async (ctx) => {
@@ -441,6 +430,28 @@ bot.action('batch_mode_cancel', async (ctx) => {
   return ctx.editMessageText('Batch creation cancelled.');
 });
 
+// Finish Multi-Batch Action
+bot.action('batch_multi_finish', async (ctx) => {
+  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
+  const db = await getDb();
+  const config = await db.collection('settings').findOne({ _id: 'config' });
+  const allIds = (config && config.admin_state && config.admin_state.ids) || [];
+
+  if (allIds.length === 0) {
+    return ctx.answerCbQuery('⚠️ No forwarded files received yet!', { show_alert: true });
+  }
+
+  await db.collection('settings').updateOne({ _id: 'config' }, { $unset: { admin_state: "" } });
+  await ctx.answerCbQuery();
+
+  const minId = Math.min(...allIds);
+  const maxId = Math.max(...allIds);
+  const payload = Buffer.from(`${minId}-${maxId}`).toString('base64');
+  const link = `https://t.me/${BOT_USERNAME}?start=BATCH_${payload}`;
+
+  return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${link}`);
+});
+
 bot.on(['message'], async (ctx) => {
   if (!ctx.from) return;
   const userId = ctx.from.id;
@@ -451,7 +462,6 @@ bot.on(['message'], async (ctx) => {
     const state = config && config.admin_state ? config.admin_state : null;
 
     if (state && state.mode) {
-      // 1. Handling Broadcast
       if (state.mode === 'awaiting_broadcast_msg') {
         await db.collection('settings').updateOne({ _id: 'config' }, { $unset: { admin_state: "" } });
         const statusMsg = await ctx.reply('⏳ Broadcasting message in progress...');
@@ -514,7 +524,7 @@ bot.on(['message'], async (ctx) => {
         return ctx.reply('✅ Warning Message updated successfully!');
       }
 
-      // --- AUTO BATCH: RANGE FORWARD ---
+      // RANGE FORWARD
       else if (state.mode === 'awaiting_range_start') {
         let fwdId = ctx.message.forward_from_message_id;
         if (!fwdId && ctx.message.text) {
@@ -551,59 +561,29 @@ bot.on(['message'], async (ctx) => {
         }
       }
 
-      // --- AUTO BATCH: SELECTED / ALBUM FORWARD ---
+      // SELECTED / ALBUM FORWARD
       else if (state.mode === 'awaiting_forward_multi') {
         const fwdId = ctx.message.forward_from_message_id;
-        if (!fwdId) {
-          return ctx.reply('❌ Please forward messages from your DB Channel.');
+        if (fwdId) {
+          await db.collection('settings').updateOne(
+            { _id: 'config' },
+            { $addToSet: { 'admin_state.ids': fwdId } }
+          );
         }
-
-        // Push ID to MongoDB array atomically
-        const updatedConfig = await db.collection('settings').findOneAndUpdate(
-          { _id: 'config' },
-          { $addToSet: { 'admin_state.ids': fwdId } },
-          { returnDocument: 'after' }
-        );
-
-        const currentIds = (updatedConfig.value && updatedConfig.value.admin_state && updatedConfig.value.admin_state.ids) || [];
-
-        // Wait 1.5 seconds for all forwarded messages in the album to arrive
-        setTimeout(async () => {
-          try {
-            const freshConfig = await db.collection('settings').findOne({ _id: 'config' });
-            if (freshConfig && freshConfig.admin_state && freshConfig.admin_state.mode === 'awaiting_forward_multi') {
-              const allIds = freshConfig.admin_state.ids || [];
-              if (allIds.length > 0) {
-                // Clear state
-                await db.collection('settings').updateOne({ _id: 'config' }, { $unset: { admin_state: "" } });
-                const minId = Math.min(...allIds);
-                const maxId = Math.max(...allIds);
-                const payload = Buffer.from(`${minId}-${maxId}`).toString('base64');
-                const link = `https://t.me/${BOT_USERNAME}?start=BATCH_${payload}`;
-                return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${link}`);
-              }
-            }
-          } catch (e) {
-            console.error('Batch multi error:', e);
-          }
-        }, 1500);
-
         return;
       }
     }
 
-    // Direct Forward/Media upload to DB channel (Single file upload)
+    // Direct Forward/Media upload to DB channel
     const isMedia = ctx.message.document || ctx.message.video || ctx.message.photo || ctx.message.audio;
     if (isMedia) {
       try {
-        // If forwarded directly from DB Channel, use its ID directly
         if (ctx.message.forward_from_chat && String(ctx.message.forward_from_chat.id) === DB_CHANNEL_ID && ctx.message.forward_from_message_id) {
           const encoded = Buffer.from(String(ctx.message.forward_from_message_id)).toString('base64');
           const fileLink = `https://t.me/${BOT_USERNAME}?start=${encoded}`;
           return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${fileLink}`);
         }
 
-        // Otherwise copy to DB Channel
         const copied = await ctx.telegram.copyMessage(DB_CHANNEL_ID, ctx.chat.id, ctx.message.message_id);
         const encoded = Buffer.from(String(copied.message_id)).toString('base64');
         const fileLink = `https://t.me/${BOT_USERNAME}?start=${encoded}`;
@@ -617,7 +597,6 @@ bot.on(['message'], async (ctx) => {
   }
 });
 
-// Admin Commands Scope
 bot.telegram.setMyCommands([
   { command: 'start', description: 'Start the bot & get files' },
   { command: 'settings', description: 'Open admin control panel' },
