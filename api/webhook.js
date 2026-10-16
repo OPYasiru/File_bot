@@ -280,7 +280,7 @@ bot.command('cancel', async (ctx) => {
     { _id: 'config' },
     { $unset: { admin_state: "" } }
   );
-  return ctx.reply('🚫 Operation cancelled.');
+  return ctx.reply('🚫 Operation cancelled.', Markup.removeKeyboard());
 });
 
 bot.action(/^(toggle_fsub|toggle_protect|toggle_autodel|set_time_\d+)$/, async (ctx) => {
@@ -393,6 +393,7 @@ bot.command('batch', async (ctx) => {
   return ctx.reply('Select Batch Mode:', keyboard);
 });
 
+// Batch Mode Actions
 bot.action('batch_mode_multi', async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const db = await getDb();
@@ -401,11 +402,15 @@ bot.action('batch_mode_multi', async (ctx) => {
     { $set: { admin_state: { mode: 'awaiting_forward_multi', ids: [] } } }
   );
   await ctx.answerCbQuery();
-  const keyboard = Markup.inlineKeyboard([
-    [Markup.button.callback('🏁 Done / Finish Batch', 'batch_multi_finish')],
-    [Markup.button.callback('❌ Cancel', 'batch_mode_cancel')]
-  ]);
-  return ctx.editMessageText('Forward your selected files from DB Channel now.\nClick "Done" when finished forwarding:', keyboard);
+  await ctx.deleteMessage().catch(() => {});
+
+  // Send persistent reply keyboard that stays at bottom of screen
+  return ctx.reply(
+    'Forward your selected files from DB Channel now.\nTap "🏁 Done Batch" below when finished:',
+    Markup.keyboard([
+      ['🏁 Done Batch', '❌ Cancel']
+    ]).resize()
+  );
 });
 
 bot.action('batch_mode_range', async (ctx) => {
@@ -430,28 +435,6 @@ bot.action('batch_mode_cancel', async (ctx) => {
   return ctx.editMessageText('Batch creation cancelled.');
 });
 
-// Finish Multi-Batch Action
-bot.action('batch_multi_finish', async (ctx) => {
-  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
-  const db = await getDb();
-  const config = await db.collection('settings').findOne({ _id: 'config' });
-  const allIds = (config && config.admin_state && config.admin_state.ids) || [];
-
-  if (allIds.length === 0) {
-    return ctx.answerCbQuery('⚠️ No forwarded files received yet!', { show_alert: true });
-  }
-
-  await db.collection('settings').updateOne({ _id: 'config' }, { $unset: { admin_state: "" } });
-  await ctx.answerCbQuery();
-
-  const minId = Math.min(...allIds);
-  const maxId = Math.max(...allIds);
-  const payload = Buffer.from(`${minId}-${maxId}`).toString('base64');
-  const link = `https://t.me/${BOT_USERNAME}?start=BATCH_${payload}`;
-
-  return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${link}`);
-});
-
 bot.on(['message'], async (ctx) => {
   if (!ctx.from) return;
   const userId = ctx.from.id;
@@ -460,6 +443,35 @@ bot.on(['message'], async (ctx) => {
     const db = await getDb();
     const config = await db.collection('settings').findOne({ _id: 'config' });
     const state = config && config.admin_state ? config.admin_state : null;
+
+    const text = ctx.message.text ? ctx.message.text.trim() : '';
+
+    // Handle persistent keyboard Cancel button
+    if (text === '❌ Cancel') {
+      await db.collection('settings').updateOne({ _id: 'config' }, { $unset: { admin_state: "" } });
+      return ctx.reply('🚫 Operation cancelled.', Markup.removeKeyboard());
+    }
+
+    // Handle persistent keyboard Done button
+    if (text === '🏁 Done Batch') {
+      if (state && state.mode === 'awaiting_forward_multi') {
+        const allIds = state.ids || [];
+        if (allIds.length === 0) {
+          return ctx.reply('⚠️ No forwarded files received yet. Please forward files first!');
+        }
+
+        await db.collection('settings').updateOne({ _id: 'config' }, { $unset: { admin_state: "" } });
+
+        const minId = Math.min(...allIds);
+        const maxId = Math.max(...allIds);
+        const payload = Buffer.from(`${minId}-${maxId}`).toString('base64');
+        const link = `https://t.me/${BOT_USERNAME}?start=BATCH_${payload}`;
+
+        return ctx.reply(`🔥 Hot Lanka Exclusive 🔥\n${link}`, Markup.removeKeyboard());
+      } else {
+        return ctx.reply('No active batch session found.', Markup.removeKeyboard());
+      }
+    }
 
     if (state && state.mode) {
       if (state.mode === 'awaiting_broadcast_msg') {
