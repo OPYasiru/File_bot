@@ -166,7 +166,7 @@ bot.start(async (ctx) => {
       $setOnInsert: { joined_at: new Date() }
     },
     { upsert: true }
-  ).catch(err => console.error('Non-blocking user track error:', err.message));
+  ).catch(err => console.error('User track error:', err.message));
 
   if (payload) {
     if (settings.fsub_enabled && settings.fsub_channels && settings.fsub_channels.length > 0) {
@@ -557,6 +557,7 @@ bot.on(['message'], async (ctx) => {
         );
       }
 
+      // Safe Forward Detection (Fixed Syntax Error)
       if (state.mode === 'awaiting_fsub_forward') {
         const fwdChat = ctx.message.forward_from_chat;
         if (fwdChat && (fwdChat.type === 'channel' || fwdChat.type === 'supergroup')) {
@@ -566,17 +567,19 @@ bot.on(['message'], async (ctx) => {
               inviteLink = await ctx.telegram.exportChatInviteLink(fwdChat.id);
             }
 
+            const channelTitle = fwdChat.title || 'Channel';
+
             await db.collection('settings').updateOne(
               { _id: 'config' },
               { 
-                $push: { fsub_channels: { id: String(fwdChat.id), title: fwdChat.title \vert{}\vert{} 'Channel', link: inviteLink } },$unset: { admin_state: "" }
+                $push: { fsub_channels: { id: String(fwdChat.id), title: channelTitle, link: inviteLink } },$unset: { admin_state: "" }
               }
             );
             await getSettings(db, true);
 
             return ctx.reply(
               `✅ **Channel Added Successfully!**\n\n` +
-              `• Title: ${fwdChat.title}\n` +
+              `• Title: ${channelTitle}\n` +
               `• ID: \`${fwdChat.id}\`\n` +
               `• Link: ${inviteLink}`,
               { parse_mode: 'Markdown' }
