@@ -20,7 +20,7 @@ async function getDb() {
   return cachedClient.db('file_store_bot');
 }
 
-// In-Memory Settings Cache (Database latency 0ms කිරීමට)
+// In-Memory Settings Cache
 let cachedSettings = null;
 let settingsCacheExpiry = 0;
 
@@ -45,7 +45,7 @@ async function getSettings(db, forceRefresh = false) {
     await col.insertOne(s);
   }
   cachedSettings = s;
-  settingsCacheExpiry = now + 5 * 60 * 1000; // විනාඩි 5ක් Cache තබා ගනී
+  settingsCacheExpiry = now + 5 * 60 * 1000;
   return s;
 }
 
@@ -65,7 +65,6 @@ function formatUserText(text, user) {
     .replace(/{last_name}/g, lastName);
 }
 
-// FSUB Parallel Check (නැවත නැවත බලා නොසිට සියලු channels එකවර check වේ)
 async function checkFsub(ctx, userId, channels) {
   const checks = channels.map(async (ch) => {
     try {
@@ -114,10 +113,13 @@ function decodeOldCodeX(buf) {
   return null;
 }
 
+// Parallel & Metadata Fast User Count Panel
 async function buildPanel(db) {
-  const settings = await getSettings(db, true);
-  const totalUsers = await db.collection('users').countDocuments();
-  const pendingDeletions = await db.collection('deletion_queue').countDocuments();
+  const [settings, totalUsers, pendingDeletions] = await Promise.all([
+    getSettings(db, true),
+    db.collection('users').estimatedDocumentCount(),
+    db.collection('deletion_queue').countDocuments()
+  ]);
 
   const panelText = `⚙️ **Bot Control Panel**\n\n` +
     `👥 **Total Users:** \`${totalUsers}\`\n` +
@@ -134,24 +136,15 @@ async function buildPanel(db) {
       Markup.button.callback(`Protect: ${settings.protect_content ? '🟢 ON' : '🔴 OFF'}`, 'toggle_protect')
     ],
     [
-      Markup.button.callback(`Auto-Delete: ${settings.auto_delete ? '🟢 ON' : '🔴 OFF'}`, 'toggle_autodel')
-    ],
-    [
-      Markup.button.callback('⏱️ 5 Mins', 'set_time_5'),
-      Markup.button.callback('⏱️ 15 Mins', 'set_time_15'),
-      Markup.button.callback('⏱️ 1 Hour', 'set_time_60')
-    ],
-    [
-      Markup.button.callback('⏱️ 3 Hours', 'set_time_180'),
-      Markup.button.callback('⏱️ 6 Hours', 'set_time_360'),
-      Markup.button.callback('⏱️ 24 Hours', 'set_time_1440')
+      Markup.button.callback(`Auto-Delete: ${settings.auto_delete ? '🟢 ON' : '🔴 OFF'}`, 'toggle_autodel'),
+      Markup.button.callback('⏱️ Change Timer', 'open_timer_menu')
     ],
     [
       Markup.button.callback('📢 Manage FSUB Channels', 'manage_fsub')
     ],
     [
-      Markup.button.callback('✏️ Edit /start Text', 'edit_welcome'),
-      Markup.button.callback('✏️ Edit Warning Text', 'edit_warning')
+      Markup.button.callback('🚀 Start Text', 'edit_welcome'),
+      Markup.button.callback('⚠️ Warning Text', 'edit_warning')
     ]
   ]);
 
@@ -166,7 +159,6 @@ bot.start(async (ctx) => {
   const payload = ctx.startPayload;
   const userId = ctx.from.id;
 
-  // Non-blocking User Tracking (පරිශීලකයාට file එක ලැබීම ප්‍රමාද නොකර පසුබිමින් record වේ)
   const fName = ctx.from.first_name || '';
   const uName = ctx.from.username || null;
   db.collection('users').updateOne(
@@ -190,7 +182,6 @@ bot.start(async (ctx) => {
 
     let msgIdsToSend = [];
 
-    // Old Link Logic
     if (payload.startsWith('DW5')) {
       try {
         const rawBuf = safeBase64Decode(payload);
@@ -201,9 +192,7 @@ bot.start(async (ctx) => {
       } catch (err) {
         console.error('Old link decode error:', err);
       }
-    } 
-    // Continuous Range Batch
-    else if (payload.startsWith('BATCH_')) {
+    } else if (payload.startsWith('BATCH_')) {
       try {
         const b64Part = payload.replace('BATCH_', '');
         const rangeStr = safeBase64Decode(b64Part).toString('utf-8');
@@ -214,9 +203,7 @@ bot.start(async (ctx) => {
       } catch (err) {
         console.error('Batch decode error:', err);
       }
-    } 
-    // Selected Multi Files (Only chosen IDs)
-    else if (payload.startsWith('MULTI_')) {
+    } else if (payload.startsWith('MULTI_')) {
       try {
         const b64Part = payload.replace('MULTI_', '');
         const idsStr = safeBase64Decode(b64Part).toString('utf-8');
@@ -224,9 +211,7 @@ bot.start(async (ctx) => {
       } catch (err) {
         console.error('Multi decode error:', err);
       }
-    } 
-    // Single File
-    else {
+    } else {
       try {
         const singleId = Number(safeBase64Decode(payload).toString('utf-8'));
         if (!isNaN(singleId) && singleId > 0) {
@@ -241,7 +226,6 @@ bot.start(async (ctx) => {
       return ctx.reply('❌ Invalid or expired link.');
     }
 
-    // Parallel Delivery Optimization (සියලුම files එකවර ක්ෂණිකව send වේ)
     const copyPromises = msgIdsToSend.map(msgId =>
       ctx.telegram.copyMessage(ctx.chat.id, DB_CHANNEL_ID, msgId, {
         protect_content: settings.protect_content
@@ -262,7 +246,6 @@ bot.start(async (ctx) => {
 
       if (settings.auto_delete) {
         const deleteAt = new Date(Date.now() + settings.delete_delay_minutes * 60 * 1000);
-        // Background write into deletion queue (User waiting time 0ms)
         db.collection('deletion_queue').insertOne({
           chat_id: ctx.chat.id,
           message_ids: sentMsgIds,
@@ -307,7 +290,7 @@ bot.command('cancel', async (ctx) => {
   return ctx.reply('🚫 Operation cancelled.', Markup.removeKeyboard());
 });
 
-bot.action(/^(toggle_fsub|toggle_protect|toggle_autodel|set_time_\d+)$/, async (ctx) => {
+bot.action(/^(toggle_fsub|toggle_protect|toggle_autodel)$/, async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const action = ctx.match[1];
   const db = await getDb();
@@ -320,19 +303,65 @@ bot.action(/^(toggle_fsub|toggle_protect|toggle_autodel|set_time_\d+)$/, async (
     await col.updateOne({ _id: 'config' }, { $set: { protect_content: !settings.protect_content } });
   } else if (action === 'toggle_autodel') {
     await col.updateOne({ _id: 'config' }, { $set: { auto_delete: !settings.auto_delete } });
-  } else if (action.startsWith('set_time_')) {
-    const mins = parseInt(action.replace('set_time_', ''));
-    await col.updateOne({ _id: 'config' }, { $set: { delete_delay_minutes: mins } });
   }
 
-  // Refresh In-Memory cache
   await getSettings(db, true);
-
-  await ctx.answerCbQuery('Settings Updated!');
+  await ctx.answerCbQuery('Updated!');
   const { panelText, keyboard } = await buildPanel(db);
   return ctx.editMessageText(panelText, { parse_mode: 'Markdown', ...keyboard });
 });
 
+// Timer Sub-Menu
+bot.action('open_timer_menu', async (ctx) => {
+  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
+  const db = await getDb();
+  const settings = await getSettings(db);
+
+  const text = `⏱️ **Select Auto-Delete Delay:**\n\n` +
+    `Current Delay: \`${formatDuration(settings.delete_delay_minutes)}\`\n\n` +
+    `Choose how long files should remain before deletion:`;
+
+  const keyboard = Markup.inlineKeyboard([
+    [
+      Markup.button.callback('⏱️ 5 Mins', 'set_time_5'),
+      Markup.button.callback('⏱️ 15 Mins', 'set_time_15'),
+      Markup.button.callback('⏱️ 1 Hour', 'set_time_60')
+    ],
+    [
+      Markup.button.callback('⏱️ 3 Hours', 'set_time_180'),
+      Markup.button.callback('⏱️ 6 Hours', 'set_time_360'),
+      Markup.button.callback('⏱️ 24 Hours', 'set_time_1440')
+    ],
+    [
+      Markup.button.callback('⬅️ Back to Settings', 'back_to_main_settings')
+    ]
+  ]);
+
+  await ctx.answerCbQuery();
+  return ctx.editMessageText(text, { parse_mode: 'Markdown', ...keyboard });
+});
+
+bot.action(/^set_time_(\d+)$/, async (ctx) => {
+  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
+  const mins = parseInt(ctx.match[1]);
+  const db = await getDb();
+  await db.collection('settings').updateOne({ _id: 'config' }, { $set: { delete_delay_minutes: mins } });
+  await getSettings(db, true);
+
+  await ctx.answerCbQuery(`Timer set to ${formatDuration(mins)}!`);
+  const { panelText, keyboard } = await buildPanel(db);
+  return ctx.editMessageText(panelText, { parse_mode: 'Markdown', ...keyboard });
+});
+
+bot.action('back_to_main_settings', async (ctx) => {
+  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
+  const db = await getDb();
+  const { panelText, keyboard } = await buildPanel(db);
+  await ctx.answerCbQuery();
+  return ctx.editMessageText(panelText, { parse_mode: 'Markdown', ...keyboard });
+});
+
+// Manage FSUB Channels Menu
 bot.action('manage_fsub', async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const db = await getDb();
@@ -351,21 +380,28 @@ bot.action('manage_fsub', async (ctx) => {
   }
 
   buttons.push([Markup.button.callback('➕ Add New Channel', 'add_fsub')]);
-  buttons.push([Markup.button.callback('⬅️ Back to Settings', 'back_settings')]);
+  buttons.push([Markup.button.callback('⬅️ Back to Settings', 'back_to_main_settings')]);
 
   await ctx.answerCbQuery();
   return ctx.editMessageText(listText, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
 });
 
+// Add Channel Step (Forward Detection Flow)
 bot.action('add_fsub', async (ctx) => {
-  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
+  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const db = await getDb();
   await db.collection('settings').updateOne(
     { _id: 'config' },
-    { $set: { admin_state: { mode: 'awaiting_fsub_input' } } }
+    { $set: { admin_state: { mode: 'awaiting_fsub_forward' } } }
   );
   await ctx.answerCbQuery();
-  return ctx.reply("Please send channel details in this format:\n\n`<Channel_ID>|<Channel_Title>|<Channel_Link>`\n\nExample:\n`-1004306300202|Backup Channel|https://t.me/yourbackup`", { parse_mode: 'Markdown' });
+  return ctx.reply(
+    "📢 **Add Force-Sub Channel:**\n\n" +
+    "1. Add this bot as an **Admin** to your channel (with invite users right).\n" +
+    "2. **Forward ANY message** from that channel to this chat.\n\n" +
+    "Send /cancel to abort.",
+    { parse_mode: 'Markdown' }
+  );
 });
 
 bot.action(/^del_fsub_(.+)$/, async (ctx) => {
@@ -374,7 +410,7 @@ bot.action(/^del_fsub_(.+)$/, async (ctx) => {
   await db.collection('settings').updateOne({ _id: 'config' }, { $pull: { fsub_channels: { id: chId } } });
   await getSettings(db, true);
   await ctx.answerCbQuery('Channel Removed!');
-  return ctx.reply('Channel removed successfully. Send /settings to refresh.');
+  return ctx.reply('Channel removed successfully. Send /settings to view changes.');
 });
 
 bot.action('edit_welcome', async (ctx) => {
@@ -399,11 +435,6 @@ bot.action('edit_warning', async (ctx) => {
   return ctx.reply("Please send your Warning Message.\n\nPlaceholders available: {time}, {mention}");
 });
 
-bot.action('back_settings', async (ctx) => {
-  await ctx.answerCbQuery();
-  return ctx.deleteMessage();
-});
-
 // Interactive /batch Command
 bot.command('batch', async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
@@ -421,7 +452,7 @@ bot.command('batch', async (ctx) => {
   return ctx.reply('Select Batch Mode:', keyboard);
 });
 
-// Batch Mode Actions
+// Batch Actions
 bot.action('batch_mode_multi', async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const db = await getDb();
@@ -478,7 +509,6 @@ bot.on(['message'], async (ctx) => {
       return ctx.reply('🚫 Operation cancelled.', Markup.removeKeyboard());
     }
 
-    // Finish Selected Multi-Batch
     if (text === '🏁 Done Batch') {
       if (state && state.mode === 'awaiting_forward_multi') {
         const allIds = state.ids || [];
@@ -534,21 +564,45 @@ bot.on(['message'], async (ctx) => {
         );
       }
 
-      if (state.mode === 'awaiting_fsub_input') {
-        const parts = ctx.message.text ? ctx.message.text.split('|') : [];
-        if (parts.length === 3) {
-          await db.collection('settings').updateOne(
-            { _id: 'config' },
-            { 
-              $push: { fsub_channels: { id: parts[0].trim(), title: parts[1].trim(), link: parts[2].trim() } },$unset: { admin_state: "" }
+      // Automated FSUB Forward Detection
+      if (state.mode === 'awaiting_fsub_forward') {
+        const fwdChat = ctx.message.forward_from_chat;
+        if (fwdChat && (fwdChat.type === 'channel' || fwdChat.type === 'supergroup')) {
+          try {
+            const botMember = await ctx.telegram.getChatMember(fwdChat.id, ctx.botInfo.id);
+            if (!['administrator', 'creator'].includes(botMember.status)) {
+              return ctx.reply('❌ The bot is NOT an admin in this channel. Please make the bot an Admin and forward again.');
             }
-          );
-          await getSettings(db, true);
-          return ctx.reply('✅ FSUB Channel added successfully!');
+
+            let inviteLink = fwdChat.username ? `https://t.me/${fwdChat.username}` : null;
+            if (!inviteLink) {
+              inviteLink = await ctx.telegram.exportChatInviteLink(fwdChat.id);
+            }
+
+            await db.collection('settings').updateOne(
+              { _id: 'config' },
+              { 
+                $push: { fsub_channels: { id: String(fwdChat.id), title: fwdChat.title \vert{}\vert{} 'Channel', link: inviteLink } },$unset: { admin_state: "" }
+              }
+            );
+            await getSettings(db, true);
+
+            return ctx.reply(
+              `✅ **Channel Added Successfully!**\n\n` +
+              `• Title: ${fwdChat.title}\n` +
+              `• ID: \`${fwdChat.id}\`\n` +
+              `• Link: ${inviteLink}`,
+              { parse_mode: 'Markdown' }
+            );
+          } catch (err) {
+            return ctx.reply(`❌ Could not verify channel: ${err.message}. Ensure the bot has invite link creation permission.`);
+          }
         } else {
-          return ctx.reply('❌ Invalid format. Please try again.');
+          return ctx.reply('❌ Please forward a message from a Channel or Group where this bot is an Admin.');
         }
-      } else if (state.mode === 'awaiting_welcome_text') {
+      }
+
+      if (state.mode === 'awaiting_welcome_text') {
         await db.collection('settings').updateOne(
           { _id: 'config' }, 
           { $set: { welcome_text: ctx.message.text },$unset: { admin_state: "" } }
