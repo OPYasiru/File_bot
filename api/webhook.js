@@ -20,7 +20,7 @@ async function getDb() {
   return cachedClient.db('file_store_bot');
 }
 
-// In-Memory Settings Cache (Database latency 0ms කිරීමට)
+// In-Memory Settings Cache
 let cachedSettings = null;
 let settingsCacheExpiry = 0;
 
@@ -113,7 +113,7 @@ function decodeOldCodeX(buf) {
   return null;
 }
 
-// Parallel Database Fetching + metadata count (Instant Loading)
+// Parallel Database Fetching (0ms response time)
 async function buildPanel(db, forceRefresh = false) {
   const [settings, totalUsers, pendingDeletions] = await Promise.all([
     getSettings(db, forceRefresh),
@@ -130,14 +130,16 @@ async function buildPanel(db, forceRefresh = false) {
     `• Delete Delay: ⏱️ ${formatDuration(settings.delete_delay_minutes)}\n` +
     `• FSUB Channels: ${settings.fsub_channels.length}`;
 
+  // 2 Rows only: No truncation + Refresh Icon
   const keyboard = Markup.inlineKeyboard([
     [
-      Markup.button.callback('⏱️ Auto-Delete Settings', 'nav_autodel'),
-      Markup.button.callback('🛡️ Protection & FSUB', 'nav_security')
+      Markup.button.callback('⏱️ Auto-Delete', 'nav_autodel'),
+      Markup.button.callback('🛡️ Protect', 'toggle_protect_direct')
     ],
     [
+      Markup.button.callback('📢 Force Sub', 'nav_fsub'),
       Markup.button.callback('✏️ Custom Texts', 'nav_texts'),
-      Markup.button.callback('🔄 Refresh Stats', 'refresh_panel')
+      Markup.button.callback('🔄', 'refresh_panel')
     ]
   ]);
 
@@ -263,12 +265,25 @@ bot.command('settings', async (ctx) => {
   return ctx.reply(panelText, { parse_mode: 'Markdown', ...keyboard });
 });
 
+// Toggle Protect directly from Main Dashboard
+bot.action('toggle_protect_direct', async (ctx) => {
+  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
+  const db = await getDb();
+  const settings = await getSettings(db);
+  await db.collection('settings').updateOne({ _id: 'config' }, { $set: { protect_content: !settings.protect_content } });
+  await getSettings(db, true);
+
+  await ctx.answerCbQuery(`Protect Content: ${!settings.protect_content ? 'ON' : 'OFF'}`);
+  const { panelText, keyboard } = await buildPanel(db);
+  return ctx.editMessageText(panelText, { parse_mode: 'Markdown', ...keyboard });
+});
+
 // Navigation: Main Dashboard & Refresh
 bot.action(['nav_main', 'refresh_panel'], async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const db = await getDb();
   const { panelText, keyboard } = await buildPanel(db, true);
-  await ctx.answerCbQuery(ctx.match[0] === 'refresh_panel' ? 'Stats Refreshed!' : undefined);
+  await ctx.answerCbQuery(ctx.match[0] === 'refresh_panel' ? 'Refreshed!' : undefined);
   return ctx.editMessageText(panelText, { parse_mode: 'Markdown', ...keyboard }).catch(() => {});
 });
 
@@ -281,7 +296,7 @@ bot.action(['nav_autodel', 'toggle_autodel'], async (ctx) => {
   if (ctx.match[0] === 'toggle_autodel') {
     await db.collection('settings').updateOne({ _id: 'config' }, { $set: { auto_delete: !settings.auto_delete } });
     settings = await getSettings(db, true);
-    await ctx.answerCbQuery('Auto-Delete Toggled!');
+    await ctx.answerCbQuery('Auto-Delete updated!');
   } else {
     await ctx.answerCbQuery();
   }
@@ -292,8 +307,8 @@ bot.action(['nav_autodel', 'toggle_autodel'], async (ctx) => {
 
   const keyboard = Markup.inlineKeyboard([
     [Markup.button.callback(`Auto-Delete: ${settings.auto_delete ? '🟢 ON' : '🔴 OFF'}`, 'toggle_autodel')],
-    [Markup.button.callback(`⏳ Change Delay Time (${formatDuration(settings.delete_delay_minutes)}) ❯`, 'nav_delay_select')],
-    [Markup.button.callback('⬅️ Back to Main Menu', 'nav_main')]
+    [Markup.button.callback(`⏳ Change Delay (${formatDuration(settings.delete_delay_minutes)}) ❯`, 'nav_delay_select')],
+    [Markup.button.callback('⬅️ Back to Menu', 'nav_main')]
   ]);
 
   return ctx.editMessageText(text, { parse_mode: 'Markdown', ...keyboard });
@@ -309,14 +324,14 @@ bot.action('nav_delay_select', async (ctx) => {
 
   const keyboard = Markup.inlineKeyboard([
     [
-      Markup.button.callback('⏱️ 5 Mins', 'set_time_5'),
-      Markup.button.callback('⏱️ 15 Mins', 'set_time_15'),
-      Markup.button.callback('⏱️ 1 Hour', 'set_time_60')
+      Markup.button.callback('5 Mins', 'set_time_5'),
+      Markup.button.callback('15 Mins', 'set_time_15'),
+      Markup.button.callback('1 Hour', 'set_time_60')
     ],
     [
-      Markup.button.callback('⏱️ 3 Hours', 'set_time_180'),
-      Markup.button.callback('⏱️ 6 Hours', 'set_time_360'),
-      Markup.button.callback('⏱️ 24 Hours', 'set_time_1440')
+      Markup.button.callback('3 Hours', 'set_time_180'),
+      Markup.button.callback('6 Hours', 'set_time_360'),
+      Markup.button.callback('24 Hours', 'set_time_1440')
     ],
     [Markup.button.callback('⬅️ Back to Auto-Delete', 'nav_autodel')]
   ]);
@@ -325,7 +340,6 @@ bot.action('nav_delay_select', async (ctx) => {
   return ctx.editMessageText(text, { parse_mode: 'Markdown', ...keyboard });
 });
 
-// Action: Set Time Delay
 bot.action(/^set_time_(\d+)$/, async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const mins = parseInt(ctx.match[1]);
@@ -335,7 +349,6 @@ bot.action(/^set_time_(\d+)$/, async (ctx) => {
 
   await ctx.answerCbQuery(`Delay updated to ${formatDuration(mins)}!`);
 
-  // Redirect back to Auto-Delete menu
   const settings = await getSettings(db);
   const text = `⏱️ **Auto-Delete Settings**\n\n` +
     `• Current Status: ${settings.auto_delete ? '🟢 ON' : '🔴 OFF'}\n` +
@@ -343,15 +356,15 @@ bot.action(/^set_time_(\d+)$/, async (ctx) => {
 
   const keyboard = Markup.inlineKeyboard([
     [Markup.button.callback(`Auto-Delete: ${settings.auto_delete ? '🟢 ON' : '🔴 OFF'}`, 'toggle_autodel')],
-    [Markup.button.callback(`⏳ Change Delay Time (${formatDuration(settings.delete_delay_minutes)}) ❯`, 'nav_delay_select')],
-    [Markup.button.callback('⬅️ Back to Main Menu', 'nav_main')]
+    [Markup.button.callback(`⏳ Change Delay (${formatDuration(settings.delete_delay_minutes)}) ❯`, 'nav_delay_select')],
+    [Markup.button.callback('⬅️ Back to Menu', 'nav_main')]
   ]);
 
   return ctx.editMessageText(text, { parse_mode: 'Markdown', ...keyboard });
 });
 
-// Navigation: Protection & FSUB
-bot.action(['nav_security', 'toggle_fsub', 'toggle_protect'], async (ctx) => {
+// Navigation: Force Sub Menu
+bot.action(['nav_fsub', 'toggle_fsub'], async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const db = await getDb();
   let settings = await getSettings(db);
@@ -359,45 +372,41 @@ bot.action(['nav_security', 'toggle_fsub', 'toggle_protect'], async (ctx) => {
   if (ctx.match[0] === 'toggle_fsub') {
     await db.collection('settings').updateOne({ _id: 'config' }, { $set: { fsub_enabled: !settings.fsub_enabled } });
     settings = await getSettings(db, true);
-    await ctx.answerCbQuery('Force Sub Toggled!');
-  } else if (ctx.match[0] === 'toggle_protect') {
-    await db.collection('settings').updateOne({ _id: 'config' }, { $set: { protect_content: !settings.protect_content } });
-    settings = await getSettings(db, true);
-    await ctx.answerCbQuery('Protect Content Toggled!');
+    await ctx.answerCbQuery('Force Sub updated!');
   } else {
     await ctx.answerCbQuery();
   }
 
-  const text = `🛡️ **Protection & FSUB Settings**\n\n` +
-    `• Force Subscription: ${settings.fsub_enabled ? '🟢 ON' : '🔴 OFF'}\n` +
-    `• Content Protection: ${settings.protect_content ? '🟢 ON' : '🔴 OFF'}\n` +
-    `• Connected FSUB Channels: \`${settings.fsub_channels.length}\``;
+  const text = `📢 **Force Sub Settings**\n\n` +
+    `• Force Sub Status: ${settings.fsub_enabled ? '🟢 ON' : '🔴 OFF'}\n` +
+    `• Connected Channels: \`${settings.fsub_channels.length}\``;
 
   const keyboard = Markup.inlineKeyboard([
-    [
-      Markup.button.callback(`FSUB: ${settings.fsub_enabled ? '🟢 ON' : '🔴 OFF'}`, 'toggle_fsub'),
-      Markup.button.callback(`Protect: ${settings.protect_content ? '🟢 ON' : '🔴 OFF'}`, 'toggle_protect')
-    ],
-    [Markup.button.callback('📢 Manage FSUB Channels ❯', 'manage_fsub')],
-    [Markup.button.callback('⬅️ Back to Main Menu', 'nav_main')]
+    [Markup.button.callback(`Force Sub: ${settings.fsub_enabled ? '🟢 ON' : '🔴 OFF'}`, 'toggle_fsub')],
+    [Markup.button.callback('➕ Add Channel (Forward)', 'add_fsub')],
+    [Markup.button.callback('📋 Manage Channels ❯', 'manage_fsub')],
+    [Markup.button.callback('⬅️ Back to Menu', 'nav_main')]
   ]);
 
   return ctx.editMessageText(text, { parse_mode: 'Markdown', ...keyboard });
 });
 
-// Navigation: Custom Texts Menu
-bot.action('nav_texts', async (ctx) => {
-  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
-  const text = `✏️ **Custom Texts Configuration**\n\nChoose what template you want to customize:`;
-
-  const keyboard = Markup.inlineKeyboard([
-    [Markup.button.callback('✏️ Edit /start Welcome Text', 'edit_welcome')],
-    [Markup.button.callback('✏️ Edit Warning Text', 'edit_warning')],
-    [Markup.button.callback('⬅️ Back to Main Menu', 'nav_main')]
-  ]);
-
+// Method A: Add Channel by Forwarding
+bot.action('add_fsub', async (ctx) => {
+  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
+  const db = await getDb();
+  await db.collection('settings').updateOne(
+    { _id: 'config' },
+    { $set: { admin_state: { mode: 'awaiting_fsub_forward' } } }
+  );
   await ctx.answerCbQuery();
-  return ctx.editMessageText(text, { parse_mode: 'Markdown', ...keyboard });
+  return ctx.reply(
+    "📢 **Add FSUB Channel**\n\n" +
+    "1. Make sure this bot is added as an **Admin** in your channel.\n" +
+    "2. **Forward any post** from that channel to this chat.\n\n" +
+    "Send /cancel to abort.",
+    { parse_mode: 'Markdown' }
+  );
 });
 
 bot.action('manage_fsub', async (ctx) => {
@@ -405,7 +414,7 @@ bot.action('manage_fsub', async (ctx) => {
   const db = await getDb();
   const settings = await getSettings(db);
 
-  let listText = "📢 **FSUB Channels List:**\n\n";
+  let listText = "📋 **Connected FSUB Channels:**\n\n";
   const buttons = [];
 
   if (settings.fsub_channels.length === 0) {
@@ -417,22 +426,11 @@ bot.action('manage_fsub', async (ctx) => {
     });
   }
 
-  buttons.push([Markup.button.callback('➕ Add New Channel', 'add_fsub')]);
-  buttons.push([Markup.button.callback('⬅️ Back to Protection', 'nav_security')]);
+  buttons.push([Markup.button.callback('➕ Add Channel', 'add_fsub')]);
+  buttons.push([Markup.button.callback('⬅️ Back to Force Sub', 'nav_fsub')]);
 
   await ctx.answerCbQuery();
   return ctx.editMessageText(listText, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
-});
-
-bot.action('add_fsub', async (ctx) => {
-  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
-  const db = await getDb();
-  await db.collection('settings').updateOne(
-    { _id: 'config' },
-    { $set: { admin_state: { mode: 'awaiting_fsub_input' } } }
-  );
-  await ctx.answerCbQuery();
-  return ctx.reply("Please send channel details in this format:\n\n`<Channel_ID>|<Channel_Title>|<Channel_Link>`\n\nExample:\n`-1004306300202|Backup Channel|https://t.me/yourbackup`", { parse_mode: 'Markdown' });
 });
 
 bot.action(/^del_fsub_(.+)$/, async (ctx) => {
@@ -440,8 +438,23 @@ bot.action(/^del_fsub_(.+)$/, async (ctx) => {
   const db = await getDb();
   await db.collection('settings').updateOne({ _id: 'config' }, { $pull: { fsub_channels: { id: chId } } });
   await getSettings(db, true);
-  await ctx.answerCbQuery('Channel Removed!');
-  return ctx.reply('Channel removed successfully. Send /settings to refresh.');
+  await ctx.answerCbQuery('Channel removed!');
+  return ctx.reply('Channel removed successfully. Send /settings to view changes.');
+});
+
+// Navigation: Custom Texts Menu
+bot.action('nav_texts', async (ctx) => {
+  if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
+  const text = `✏️ **Custom Texts Configuration**\n\nSelect which message you want to edit:`;
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('👋 Welcome Msg (/start)', 'edit_welcome')],
+    [Markup.button.callback('⚠️ Warning Msg', 'edit_warning')],
+    [Markup.button.callback('⬅️ Back to Menu', 'nav_main')]
+  ]);
+
+  await ctx.answerCbQuery();
+  return ctx.editMessageText(text, { parse_mode: 'Markdown', ...keyboard });
 });
 
 bot.action('edit_welcome', async (ctx) => {
@@ -452,7 +465,7 @@ bot.action('edit_welcome', async (ctx) => {
     { $set: { admin_state: { mode: 'awaiting_welcome_text' } } }
   );
   await ctx.answerCbQuery();
-  return ctx.reply("Please send your new /start Welcome Message.\n\nYou can use placeholders:\n• {mention}\n• {first_name}\n• {last_name}");
+  return ctx.reply("Please send your new Welcome Message.\n\nAvailable placeholders:\n• {mention}\n• {first_name}\n• {last_name}\n\nSend /cancel to abort.");
 });
 
 bot.action('edit_warning', async (ctx) => {
@@ -463,7 +476,7 @@ bot.action('edit_warning', async (ctx) => {
     { $set: { admin_state: { mode: 'awaiting_warning_text' } } }
   );
   await ctx.answerCbQuery();
-  return ctx.reply("Please send your Warning Message.\n\nPlaceholders available: {time}, {mention}");
+  return ctx.reply("Please send your new Warning Message.\n\nAvailable placeholders:\n• {time}\n• {mention}\n\nSend /cancel to abort.");
 });
 
 bot.command('broadcast', async (ctx) => {
@@ -473,7 +486,7 @@ bot.command('broadcast', async (ctx) => {
     { _id: 'config' },
     { $set: { admin_state: { mode: 'awaiting_broadcast_msg' } } }
   );
-  return ctx.reply('📢 **Broadcast Mode:**\n\nPlease send or forward the message you want to broadcast to all users.\n\nSend /cancel to abort.', { parse_mode: 'Markdown' });
+  return ctx.reply('📢 **Broadcast Mode:**\n\nPlease send or forward the message you want to broadcast.\n\nSend /cancel to abort.', { parse_mode: 'Markdown' });
 });
 
 bot.command('cancel', async (ctx) => {
@@ -578,6 +591,51 @@ bot.on(['message'], async (ctx) => {
     }
 
     if (state && state.mode) {
+      // Auto Forward Detection for FSUB (Method A)
+      if (state.mode === 'awaiting_fsub_forward') {
+        const fwdChat = ctx.message.forward_from_chat;
+        if (!fwdChat || fwdChat.type !== 'channel') {
+          return ctx.reply('❌ Please forward a message from a **Channel**.');
+        }
+
+        const channelId = String(fwdChat.id);
+        const channelTitle = fwdChat.title || 'Channel';
+
+        // Check Admin Status and Generate Link
+        try {
+          const chatMember = await ctx.telegram.getChatMember(channelId, ctx.botInfo.id);
+          if (!['administrator', 'creator'].includes(chatMember.status)) {
+            return ctx.reply('❌ The bot is not an admin in this channel. Make the bot admin first!');
+          }
+
+          let inviteLink = fwdChat.username ? `https://t.me/${fwdChat.username}` : null;
+          if (!inviteLink) {
+            inviteLink = await ctx.telegram.exportChatInviteLink(channelId);
+          }
+
+          await db.collection('settings').updateOne(
+            { _id: 'config' },
+            {
+              $pull: { fsub_channels: { id: channelId } }
+            }
+          );
+
+          await db.collection('settings').updateOne(
+            { _id: 'config' },
+            {
+              $push: { fsub_channels: { id: channelId, title: channelTitle, link: inviteLink } },
+              $unset: { admin_state: "" }
+            }
+          );
+
+          await getSettings(db, true);
+          return ctx.reply(`✅ Channel **${channelTitle}** added successfully to Force Sub!`, { parse_mode: 'Markdown' });
+        } catch (err) {
+          console.error('FSUB Forward Error:', err);
+          return ctx.reply(`❌ Error adding channel: ${err.message}. Ensure bot is Admin!`);
+        }
+      }
+
       if (state.mode === 'awaiting_broadcast_msg') {
         await db.collection('settings').updateOne({ _id: 'config' }, { $unset: { admin_state: "" } });
         const statusMsg = await ctx.reply('⏳ Broadcasting message in progress...');
@@ -613,21 +671,7 @@ bot.on(['message'], async (ctx) => {
         );
       }
 
-      if (state.mode === 'awaiting_fsub_input') {
-        const parts = ctx.message.text ? ctx.message.text.split('|') : [];
-        if (parts.length === 3) {
-          await db.collection('settings').updateOne(
-            { _id: 'config' },
-            { 
-              $push: { fsub_channels: { id: parts[0].trim(), title: parts[1].trim(), link: parts[2].trim() } },$unset: { admin_state: "" }
-            }
-          );
-          await getSettings(db, true);
-          return ctx.reply('✅ FSUB Channel added successfully!');
-        } else {
-          return ctx.reply('❌ Invalid format. Please try again.');
-        }
-      } else if (state.mode === 'awaiting_welcome_text') {
+      if (state.mode === 'awaiting_welcome_text') {
         await db.collection('settings').updateOne(
           { _id: 'config' }, 
           { $set: { welcome_text: ctx.message.text },$unset: { admin_state: "" } }
