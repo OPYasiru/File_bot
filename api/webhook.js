@@ -20,7 +20,6 @@ async function getDb() {
   return cachedClient.db('file_store_bot');
 }
 
-// In-Memory Settings Cache
 let cachedSettings = null;
 let settingsCacheExpiry = 0;
 
@@ -113,12 +112,11 @@ function decodeOldCodeX(buf) {
   return null;
 }
 
-// Parallel & Metadata Fast User Count Panel
 async function buildPanel(db) {
   const [settings, totalUsers, pendingDeletions] = await Promise.all([
     getSettings(db, true),
-    db.collection('users').estimatedDocumentCount(),
-    db.collection('deletion_queue').countDocuments()
+    db.collection('users').estimatedDocumentCount().catch(() => 0),
+    db.collection('deletion_queue').countDocuments().catch(() => 0)
   ]);
 
   const panelText = `⚙️ **Bot Control Panel**\n\n` +
@@ -311,7 +309,6 @@ bot.action(/^(toggle_fsub|toggle_protect|toggle_autodel)$/, async (ctx) => {
   return ctx.editMessageText(panelText, { parse_mode: 'Markdown', ...keyboard });
 });
 
-// Timer Sub-Menu
 bot.action('open_timer_menu', async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const db = await getDb();
@@ -361,7 +358,6 @@ bot.action('back_to_main_settings', async (ctx) => {
   return ctx.editMessageText(panelText, { parse_mode: 'Markdown', ...keyboard });
 });
 
-// Manage FSUB Channels Menu
 bot.action('manage_fsub', async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const db = await getDb();
@@ -386,7 +382,6 @@ bot.action('manage_fsub', async (ctx) => {
   return ctx.editMessageText(listText, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
 });
 
-// Add Channel Step (Forward Detection Flow)
 bot.action('add_fsub', async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const db = await getDb();
@@ -435,7 +430,6 @@ bot.action('edit_warning', async (ctx) => {
   return ctx.reply("Please send your Warning Message.\n\nPlaceholders available: {time}, {mention}");
 });
 
-// Interactive /batch Command
 bot.command('batch', async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return;
 
@@ -452,7 +446,6 @@ bot.command('batch', async (ctx) => {
   return ctx.reply('Select Batch Mode:', keyboard);
 });
 
-// Batch Actions
 bot.action('batch_mode_multi', async (ctx) => {
   if (!ctx.from || String(ctx.from.id) !== ADMIN_ID) return ctx.answerCbQuery('Unauthorized');
   const db = await getDb();
@@ -564,16 +557,10 @@ bot.on(['message'], async (ctx) => {
         );
       }
 
-      // Automated FSUB Forward Detection
       if (state.mode === 'awaiting_fsub_forward') {
         const fwdChat = ctx.message.forward_from_chat;
         if (fwdChat && (fwdChat.type === 'channel' || fwdChat.type === 'supergroup')) {
           try {
-            const botMember = await ctx.telegram.getChatMember(fwdChat.id, ctx.botInfo.id);
-            if (!['administrator', 'creator'].includes(botMember.status)) {
-              return ctx.reply('❌ The bot is NOT an admin in this channel. Please make the bot an Admin and forward again.');
-            }
-
             let inviteLink = fwdChat.username ? `https://t.me/${fwdChat.username}` : null;
             if (!inviteLink) {
               inviteLink = await ctx.telegram.exportChatInviteLink(fwdChat.id);
@@ -595,10 +582,10 @@ bot.on(['message'], async (ctx) => {
               { parse_mode: 'Markdown' }
             );
           } catch (err) {
-            return ctx.reply(`❌ Could not verify channel: ${err.message}. Ensure the bot has invite link creation permission.`);
+            return ctx.reply(`❌ Could not verify channel: ${err.message}. Ensure the bot is an Admin with invite link permission.`);
           }
         } else {
-          return ctx.reply('❌ Please forward a message from a Channel or Group where this bot is an Admin.');
+          return ctx.reply('❌ Please forward a message directly from the Channel.');
         }
       }
 
@@ -618,7 +605,6 @@ bot.on(['message'], async (ctx) => {
         return ctx.reply('✅ Warning Message updated successfully!');
       }
 
-      // RANGE FORWARD
       else if (state.mode === 'awaiting_range_start') {
         let fwdId = ctx.message.forward_from_message_id;
         if (!fwdId && ctx.message.text) {
@@ -655,7 +641,6 @@ bot.on(['message'], async (ctx) => {
         }
       }
 
-      // SELECTED / ALBUM FORWARD
       else if (state.mode === 'awaiting_forward_multi') {
         const fwdId = ctx.message.forward_from_message_id;
         if (fwdId) {
@@ -668,7 +653,6 @@ bot.on(['message'], async (ctx) => {
       }
     }
 
-    // Direct Forward/Media upload to DB channel
     const isMedia = ctx.message.document || ctx.message.video || ctx.message.photo || ctx.message.audio;
     if (isMedia) {
       try {
@@ -690,16 +674,6 @@ bot.on(['message'], async (ctx) => {
     }
   }
 });
-
-bot.telegram.setMyCommands([
-  { command: 'start', description: 'Start the bot & get files' },
-  { command: 'settings', description: 'Open admin control panel' },
-  { command: 'batch', description: 'Create a batch link for files' },
-  { command: 'broadcast', description: 'Broadcast message to users' },
-  { command: 'cancel', description: 'Cancel current operation' }
-], {
-  scope: { type: 'chat', chat_id: Number(ADMIN_ID) }
-}).catch(err => console.error('Error setting admin commands:', err.message));
 
 module.exports = async (req, res) => {
   if (req.method === 'POST') {
