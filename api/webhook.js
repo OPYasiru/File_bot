@@ -10,13 +10,25 @@ const BOT_USERNAME = process.env.BOT_USERNAME || 'LankaFile_bot';
 let cachedClient = null;
 async function getDb() {
   if (!cachedClient) {
-    cachedClient = new MongoClient(MONGODB_URI);
+    cachedClient = new MongoClient(MONGODB_URI, {
+      maxPoolSize: 10,
+      minPoolSize: 1,
+      maxIdleTimeMS: 60000
+    });
     await cachedClient.connect();
   }
   return cachedClient.db('file_store_bot');
 }
 
-async function getSettings(db) {
+// In-Memory Settings Cache (Database latency 0ms කිරීමට)
+let cachedSettings = null;
+let settingsCacheExpiry = 0;
+
+async function getSettings(db, forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh && cachedSettings && now < settingsCacheExpiry) {
+    return cachedSettings;
+  }
   const col = db.collection('settings');
   let s = await col.findOne({ _id: 'config' });
   if (!s) {
@@ -32,6 +44,8 @@ async function getSettings(db) {
     };
     await col.insertOne(s);
   }
+  cachedSettings = s;
+  settingsCacheExpiry = now + 5 * 60 * 1000; // විනාඩි 5ක් Cache තබා ගනී
   return s;
 }
 
@@ -51,20 +65,23 @@ function formatUserText(text, user) {
     .replace(/{last_name}/g, lastName);
 }
 
+// FSUB Parallel Check (නැවත නැවත බලා නොසිට සියලු channels එකවර check වේ)
 async function checkFsub(ctx, userId, channels) {
-  const notJoined = [];
-  for (const ch of channels) {
+  const checks = channels.map(async (ch) => {
     try {
       const channelId = String(ch.id).trim();
       const member = await ctx.telegram.getChatMember(channelId, userId);
       if (['left', 'kicked'].includes(member.status)) {
-        notJoined.push(ch);
+        return ch;
       }
+      return null;
     } catch (e) {
-      notJoined.push(ch);
+      return ch;
     }
-  }
-  return notJoined;
+  });
+
+  const results = await Promise.all(checks);
+  return results.filter(Boolean);
 }
 
 function formatDuration(mins) {
@@ -98,7 +115,7 @@ function decodeOldCodeX(buf) {
 }
 
 async function buildPanel(db) {
-  const settings = await getSettings(db);
+  const settings = await getSettings(db, true);
   const totalUsers = await db.collection('users').countDocuments();
   const pendingDeletions = await db.collection('deletion_queue').countDocuments();
 
@@ -149,24 +166,17 @@ bot.start(async (ctx) => {
   const payload = ctx.startPayload;
   const userId = ctx.from.id;
 
-  try {
-    const fName = ctx.from.first_name || '';
-    const uName = ctx.from.username || null;
-    await db.collection('users').updateOne(
-      { _id: userId },
-      { 
-        $set: { 
-          first_name: fName, 
-          username: uName, 
-          last_active: new Date() 
-        },
-        $setOnInsert: { joined_at: new Date() }
-      },
-      { upsert: true }
-    );
-  } catch (err) {
-    console.error('Error tracking user:', err.message);
-  }
+  // Non-blocking User Tracking (පරිශීලකයාට file එක ලැබීම ප්‍රමාද නොකර පසුබිමින් record වේ)
+  const fName = ctx.from.first_name || '';
+  const uName = ctx.from.username || null;
+  db.collection('users').updateOne(
+    { _id: userId },
+    { 
+      $set: { first_name: fName, username: uName, last_active: new Date() },
+      $setOnInsert: { joined_at: new Date() }
+    },
+    { upsert: true }
+  ).catch(err => console.error('Non-blocking user track error:', err.message));
 
   if (payload) {
     if (settings.fsub_enabled && settings.fsub_channels && settings.fsub_channels.length > 0) {
@@ -180,7 +190,7 @@ bot.start(async (ctx) => {
 
     let msgIdsToSend = [];
 
-    // Old DW5 Link Logic
+    // Old Link Logic
     if (payload.startsWith('DW5')) {
       try {
         const rawBuf = safeBase64Decode(payload);
@@ -192,7 +202,7 @@ bot.start(async (ctx) => {
         console.error('Old link decode error:', err);
       }
     } 
-    // Continuous Range Batch Logic
+    // Continuous Range Batch
     else if (payload.startsWith('BATCH_')) {
       try {
         const b64Part = payload.replace('BATCH_', '');
@@ -205,7 +215,7 @@ bot.start(async (ctx) => {
         console.error('Batch decode error:', err);
       }
     } 
-    // Custom Selected Multi-Files Logic (Only chosen IDs)
+    // Selected Multi Files (Only chosen IDs)
     else if (payload.startsWith('MULTI_')) {
       try {
         const b64Part = payload.replace('MULTI_', '');
@@ -215,7 +225,7 @@ bot.start(async (ctx) => {
         console.error('Multi decode error:', err);
       }
     } 
-    // Single File Logic
+    // Single File
     else {
       try {
         const singleId = Number(safeBase64Decode(payload).toString('utf-8'));
@@ -231,18 +241,18 @@ bot.start(async (ctx) => {
       return ctx.reply('❌ Invalid or expired link.');
     }
 
-    const sentMsgIds = [];
+    // Parallel Delivery Optimization (සියලුම files එකවර ක්ෂණිකව send වේ)
+    const copyPromises = msgIdsToSend.map(msgId =>
+      ctx.telegram.copyMessage(ctx.chat.id, DB_CHANNEL_ID, msgId, {
+        protect_content: settings.protect_content
+      }).catch(err => {
+        console.warn(`Skipped missing msg ${msgId}:`, err.message);
+        return null;
+      })
+    );
 
-    for (const msgId of msgIdsToSend) {
-      try {
-        const res = await ctx.telegram.copyMessage(ctx.chat.id, DB_CHANNEL_ID, msgId, {
-          protect_content: settings.protect_content
-        });
-        sentMsgIds.push(res.message_id);
-      } catch (err) {
-        console.warn(`Skipped missing/deleted msg ${msgId}:${err.message}`);
-      }
-    }
+    const results = await Promise.all(copyPromises);
+    const sentMsgIds = results.filter(Boolean).map(res => res.message_id);
 
     if (sentMsgIds.length > 0) {
       let warnText = settings.warning_text.replace('{time}', formatDuration(settings.delete_delay_minutes));
@@ -252,11 +262,12 @@ bot.start(async (ctx) => {
 
       if (settings.auto_delete) {
         const deleteAt = new Date(Date.now() + settings.delete_delay_minutes * 60 * 1000);
-        await db.collection('deletion_queue').insertOne({
+        // Background write into deletion queue (User waiting time 0ms)
+        db.collection('deletion_queue').insertOne({
           chat_id: ctx.chat.id,
           message_ids: sentMsgIds,
           delete_at: deleteAt
-        });
+        }).catch(err => console.error('Deletion queue save error:', err.message));
       }
     } else {
       return ctx.reply('❌ No available files found for this link.');
@@ -314,6 +325,9 @@ bot.action(/^(toggle_fsub|toggle_protect|toggle_autodel|set_time_\d+)$/, async (
     await col.updateOne({ _id: 'config' }, { $set: { delete_delay_minutes: mins } });
   }
 
+  // Refresh In-Memory cache
+  await getSettings(db, true);
+
   await ctx.answerCbQuery('Settings Updated!');
   const { panelText, keyboard } = await buildPanel(db);
   return ctx.editMessageText(panelText, { parse_mode: 'Markdown', ...keyboard });
@@ -358,6 +372,7 @@ bot.action(/^del_fsub_(.+)$/, async (ctx) => {
   const chId = ctx.match[1];
   const db = await getDb();
   await db.collection('settings').updateOne({ _id: 'config' }, { $pull: { fsub_channels: { id: chId } } });
+  await getSettings(db, true);
   await ctx.answerCbQuery('Channel Removed!');
   return ctx.reply('Channel removed successfully. Send /settings to refresh.');
 });
@@ -473,7 +488,6 @@ bot.on(['message'], async (ctx) => {
 
         await db.collection('settings').updateOne({ _id: 'config' }, { $unset: { admin_state: "" } });
 
-        // Sort ascending so files deliver in order
         allIds.sort((a, b) => a - b);
         const payload = Buffer.from(allIds.join(',')).toString('base64');
         const link = `https://t.me/${BOT_USERNAME}?start=MULTI_${payload}`;
@@ -529,6 +543,7 @@ bot.on(['message'], async (ctx) => {
               $push: { fsub_channels: { id: parts[0].trim(), title: parts[1].trim(), link: parts[2].trim() } },$unset: { admin_state: "" }
             }
           );
+          await getSettings(db, true);
           return ctx.reply('✅ FSUB Channel added successfully!');
         } else {
           return ctx.reply('❌ Invalid format. Please try again.');
@@ -538,12 +553,14 @@ bot.on(['message'], async (ctx) => {
           { _id: 'config' }, 
           { $set: { welcome_text: ctx.message.text },$unset: { admin_state: "" } }
         );
+        await getSettings(db, true);
         return ctx.reply('✅ Welcome Message updated successfully!');
       } else if (state.mode === 'awaiting_warning_text') {
         await db.collection('settings').updateOne(
           { _id: 'config' }, 
           { $set: { warning_text: ctx.message.text },$unset: { admin_state: "" } }
         );
+        await getSettings(db, true);
         return ctx.reply('✅ Warning Message updated successfully!');
       }
 
